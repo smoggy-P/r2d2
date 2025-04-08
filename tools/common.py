@@ -28,8 +28,8 @@ def torch_set_gpu(gpus):
 
     if cuda:
         os.environ['CUDA_VISIBLE_DEVICES'] = ','.join([str(gpu) for gpu in gpus])
-        assert cuda and torch.cuda.is_available(), "%s has GPUs %s unavailable" % (
-            os.environ['HOSTNAME'],os.environ['CUDA_VISIBLE_DEVICES'])
+        assert cuda and torch.cuda.is_available(), "I have GPUs %s unavailable" % (
+            os.environ['CUDA_VISIBLE_DEVICES'])
         torch.backends.cudnn.benchmark = True # speed-up cudnn
         torch.backends.cudnn.fastest = True # even more speed-up?
         print( 'Launching on GPUs ' + os.environ['CUDA_VISIBLE_DEVICES'] )

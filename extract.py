@@ -7,7 +7,7 @@ import os, pdb
 from PIL import Image
 import numpy as np
 import torch
-
+import time
 from tools import common
 from tools.dataloader import norm_RGB
 from nets.patchnet import *
@@ -134,6 +134,8 @@ def extract_keypoints(args):
         if iscuda: img = img.cuda()
         
         # extract keypoints/descriptors for a single image
+        # Recording the time of extraction
+        start_time = time.time()
         xys, desc, scores = extract_multiscale(net, img, detector,
             scale_f   = args.scale_f, 
             min_scale = args.min_scale, 
@@ -141,6 +143,8 @@ def extract_keypoints(args):
             min_size  = args.min_size, 
             max_size  = args.max_size, 
             verbose = True)
+        end_time = time.time()
+        print(f"Extraction time: {end_time - start_time} seconds")
 
         xys = xys.cpu().numpy()
         desc = desc.cpu().numpy()

@@ -16,7 +16,7 @@ from tools import common
 from tools.dataloader import norm_RGB
 from nets.patchnet import *
 from extract import load_network, NonMaxSuppression, extract_multiscale
-
+from sensor_msgs.msg import PointCloud2
 class R2D2ExtractorNode:
     def __init__(self):
         rospy.init_node('r2d2_extractor_node')
@@ -30,7 +30,15 @@ class R2D2ExtractorNode:
         # 设置发布者和订阅者
         self.bridge = CvBridge()
         self.image_sub = rospy.Subscriber('/D435i_camera/color/image_raw', Image, self.image_callback)
+        self.depth_sub = rospy.Subscriber("/D435i_camera/depth/image_rect_raw", Image, self.depth_callback)
         self.vis_pub = rospy.Publisher('/r2d2/visualization', Image, queue_size=1)
+        self.pc_pub = rospy.Publisher('/r2d2/point_cloud', PointCloud2, queue_size=1)
+        # Get the camera info
+        self.fx = rospy.get_param('~fx', 695.99511719)
+        self.fy = rospy.get_param('~fy', 695.99511719)
+        self.cx = rospy.get_param('~cx', 640)
+        self.cy = rospy.get_param('~cy', 360)
+        self.depth_img = None
         
         # 加载网络
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -45,6 +53,12 @@ class R2D2ExtractorNode:
         )
         
         rospy.loginfo("R2D2 extractor node initialized")
+    def depth_callback(self, msg):
+        try:
+            # 将ROS图像消息转换为OpenCV格式
+            self.depth_img = self.bridge.imgmsg_to_cv2(msg, "16UC1")
+        except Exception as e:
+            rospy.logerr(f"Error processing depth image: {str(e)}")
 
     def image_callback(self, msg):
         try:
@@ -81,15 +95,40 @@ class R2D2ExtractorNode:
             # 将分数归一化到0-1
             norm_scores = (selected_scores - selected_scores.min()) / (selected_scores.max() - selected_scores.min())
             
-            for kp, score in zip(selected_kpts, norm_scores):
-                x, y, scale = kp
-                # 使用HSV颜色空间，根据分数设置颜色（分数越高越偏红）
-                color = cv2.applyColorMap(np.uint8([score * 255]), cv2.COLORMAP_JET)[0][0]
-                color = (int(color[0]), int(color[1]), int(color[2]))
+            if self.depth_img is not None:
+                points = []
+                for kp, score in zip(selected_kpts, norm_scores):
+                    x, y, scale = kp
+                    # Project the keypoint to the depth image and publish point cloud
+                    if x < self.depth_img.shape[1] and y < self.depth_img.shape[0]:
+                        depth = self.depth_img[int(y), int(x)]
+                        if depth > 0:
+                            depth_meters = depth / 1000.0
+
+                            x_world = depth_meters
+                            y_world = -(x - self.cx) * depth_meters / self.fx
+                            z_world = -(y - self.cy) * depth_meters / self.fy
+                            points.append((x_world, y_world, z_world, score))
+            if len(points) > 0:
+                # 创建PointCloud2消息
+                from sensor_msgs.msg import PointField
+                import sensor_msgs.point_cloud2 as pc2
                 
-                # 绘制圆圈，大小根据scale调整
-                radius = int(scale * 2)
-                # cv2.circle(vis_img, (int(x), int(y)), max(1, radius//2), color, -1)
+                # 定义点云字段
+                fields = [
+                    PointField('x', 0, PointField.FLOAT32, 1),
+                    PointField('y', 4, PointField.FLOAT32, 1),
+                    PointField('z', 8, PointField.FLOAT32, 1),
+                    PointField('intensity', 12, PointField.FLOAT32, 1)
+                ]
+                
+                # 创建点云消息
+                header = msg.header
+                header.frame_id = "D435i_camera_depth_frame"
+                pc_msg = pc2.create_cloud(header, fields, points)
+                
+                # 发布点云
+                self.pc_pub.publish(pc_msg)
             
             # 发布可视化结果
             vis_msg = self.bridge.cv2_to_imgmsg(vis_img, "rgb8")

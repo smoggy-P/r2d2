@@ -10,6 +10,7 @@ import torch
 import numpy as np
 import cv2
 from PIL import Image as PILImage
+import time
 import torch.nn.functional as F
 
 from tools import common
@@ -71,6 +72,8 @@ class R2D2ExtractorNode:
             img = img.to(self.device)
             
             # 提取特征点
+            print("start extract")
+            start_time = time.time()
             xys, desc, scores = extract_multiscale(
                 self.net, img, self.detector,
                 scale_f=2**0.25,
@@ -79,7 +82,7 @@ class R2D2ExtractorNode:
                 min_size=256,
                 max_size=1024
             )
-            
+            print("extract done, consuming time: ", time.time() - start_time)
             # 转换为numpy数组
             xys = xys.cpu().numpy()
             scores = scores.cpu().numpy()

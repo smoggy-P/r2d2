@@ -160,7 +160,7 @@ class R2D2GlobalFeatureNode:
                     # Project the keypoint to the depth image and publish point cloud
                     if x < self.depth_img.shape[1] and y < self.depth_img.shape[0]:
                         depth = self.depth_img[int(y), int(x)]
-                        if depth > 0:
+                        if depth > 0 and score > 0.9:
                             depth_meters = depth / 1000.0
 
                             x_world = depth_meters
@@ -224,6 +224,33 @@ class R2D2GlobalFeatureNode:
         # Filter ground points
         points = points[points[:, 2] > 0.2]
         
+        # Expand feature points in 6 directions with 0.1 resolution
+        expanded_points = []
+        resolution = 0.1
+        
+        # Define 6 directions: +x, -x, +y, -y, +z, -z
+        directions = np.array([
+            [resolution, 0, 0],    # +x
+            [-resolution, 0, 0],   # -x
+            [0, resolution, 0],    # +y
+            [0, -resolution, 0],   # -y
+            [0, 0, resolution],    # +z
+            [0, 0, -resolution]    # -z
+        ])
+        
+        for point in points:
+            x, y, z, intensity = point
+            
+            # Add the original point
+            expanded_points.append([x, y, z, intensity])
+            
+            # Add expanded points in 6 directions
+            for direction in directions:
+                dx, dy, dz = direction
+                expanded_points.append([x + dx, y + dy, z + dz, intensity])
+        
+        expanded_points = np.array(expanded_points)
+        
         header = rospy.Header()
         header.stamp = rospy.Time.now()
         header.frame_id = self.world_frame
@@ -233,7 +260,7 @@ class R2D2GlobalFeatureNode:
             PointField('z', 8, PointField.FLOAT32, 1),
             PointField('intensity', 12, PointField.FLOAT32, 1)
         ]
-        pc_msg = pc2.create_cloud(header, fields, points)
+        pc_msg = pc2.create_cloud(header, fields, expanded_points)
         self.global_pub.publish(pc_msg)
 
 if __name__ == '__main__':

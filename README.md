@@ -1,4 +1,16 @@
 # R2D2: Reliable and Repeatable Detector and Descriptor #
+
+## R2D2 ROS bridge environment setup
+```bash
+mamba create -n r2d2 python=3.8.20
+mamba activate r2d2
+mamba install torchvision=0.14.1
+mamba install rospkg
+mamba install opencv=4.7.0
+mamba install scipy
+python extract_ros_global.py
+```
+
 This repository contains the implementation of the following [paper](https://europe.naverlabs.com/research/publications/r2d2-reliable-and-repeatable-detectors-and-descriptors-for-joint-sparse-local-keypoint-detection-and-feature-extraction/):
 
 ```text

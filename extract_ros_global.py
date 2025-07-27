@@ -30,8 +30,8 @@ class R2D2GlobalFeatureNode:
         # 获取ROS参数
         self.model_path = rospy.get_param('~model_path', 'models/r2d2_WASF_N16.pt')
         self.num_keypoints = rospy.get_param('~num_keypoints', 1000)
-        self.reliability_thr = rospy.get_param('~reliability_thr', 0.7)
-        self.repeatability_thr = rospy.get_param('~repeatability_thr', 0.7)
+        self.reliability_thr = rospy.get_param('~reliability_thr', 0.8)
+        self.repeatability_thr = rospy.get_param('~repeatability_thr', 0.8)
         self.map_range_x = rospy.get_param("~map_range_x", 100.0)
         self.map_range_y = rospy.get_param("~map_range_y", 100.0)
         self.map_range_z = rospy.get_param("~map_range_z", 50.0)
@@ -230,12 +230,12 @@ class R2D2GlobalFeatureNode:
         
         # Define 6 directions: +x, -x, +y, -y, +z, -z
         directions = np.array([
-            [resolution, 0, 0],    # +x
-            [-resolution, 0, 0],   # -x
-            [0, resolution, 0],    # +y
-            [0, -resolution, 0],   # -y
-            [0, 0, resolution],    # +z
-            [0, 0, -resolution]    # -z
+            # [resolution, 0, 0],    # +x
+            # [-resolution, 0, 0],   # -x
+            # [0, resolution, 0],    # +y
+            # [0, -resolution, 0],   # -y
+            # [0, 0, resolution],    # +z
+            # [0, 0, -resolution]    # -z
         ])
         
         for point in points:

@@ -30,8 +30,8 @@ class R2D2GlobalFeatureNode:
         # 获取ROS参数
         self.model_path = rospy.get_param('~model_path', 'models/r2d2_WASF_N16.pt')
         self.num_keypoints = rospy.get_param('~num_keypoints', 1000)
-        self.reliability_thr = rospy.get_param('~reliability_thr', 0.8)
-        self.repeatability_thr = rospy.get_param('~repeatability_thr', 0.8)
+        self.reliability_thr = rospy.get_param('~reliability_thr', 0.2)
+        self.repeatability_thr = rospy.get_param('~repeatability_thr', 0.2)
         self.map_range_x = rospy.get_param("~map_range_x", 100.0)
         self.map_range_y = rospy.get_param("~map_range_y", 100.0)
         self.map_range_z = rospy.get_param("~map_range_z", 50.0)
@@ -55,6 +55,7 @@ class R2D2GlobalFeatureNode:
         
         # 加载网络
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print("device: ", self.device)
         self.net = load_network(self.model_path)
         self.net = self.net.to(self.device)
         self.net.eval()
@@ -151,7 +152,8 @@ class R2D2GlobalFeatureNode:
             vis_img = cv_image.copy()
             
             # 将分数归一化到0-1
-            norm_scores = (selected_scores - selected_scores.min()) / (selected_scores.max() - selected_scores.min())
+            norm_scores = (selected_scores - 0.9958) / (0.9992 - 0.9958)
+            print("min score: ", norm_scores.min(), " max score: ", norm_scores.max())
             
             points = []
             if self.depth_img is not None:
@@ -222,7 +224,7 @@ class R2D2GlobalFeatureNode:
             points = np.array(self.global_points)
         
         # Filter ground points
-        points = points[points[:, 2] > 0.2]
+        points = points[points[:, 2] > 0.1]
         
         # Expand feature points in 6 directions with 0.1 resolution
         expanded_points = []

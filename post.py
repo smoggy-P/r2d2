@@ -207,6 +207,10 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
     position_errors = []
     orientation_errors = []
     
+    # Flag to track if we should stop processing due to large position error
+    stop_processing = False
+    stop_timestamp = None
+    
     for i, (vins_time, vins_msg) in enumerate(vins_odom_data):
         if vins_time < first_common_time or vins_time > end_time:
             continue
@@ -251,6 +255,13 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
         # Calculate errors between aligned VINS and ground truth
         pos_error = calculate_position_error(gt_msg.pose.pose.position, aligned_vins_pos)
         
+        # Check if position error is too large (> 2.0m)
+        if pos_error > 2.0:
+            print(f"Position error {pos_error:.3f}m exceeds 2.0m at timestamp {vins_time:.2f}s. Stopping processing.")
+            stop_processing = True
+            stop_timestamp = vins_time
+            break
+        
         # For orientation, compare the aligned VINS with GT
         orient_error = calculate_orientation_error(
             gt_msg.pose.pose.orientation,
@@ -266,7 +277,11 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
     position_errors = np.array(position_errors)
     orientation_errors = np.array(orientation_errors)
     
-    print(f"Calculated {len(error_times)} error measurements after alignment")
+    if stop_processing:
+        print(f"Processing stopped at timestamp {stop_timestamp:.2f}s due to large position error")
+        print(f"Final data range: {error_times[0]:.2f}s to {error_times[-1]:.2f}s")
+    else:
+        print(f"Calculated {len(error_times)} error measurements after alignment")
     
     return (exploration_times_filtered, exploration_rates_filtered,
             error_times, position_errors, orientation_errors)
@@ -286,6 +301,11 @@ def create_plots(exploration_times, exploration_rates, error_times,
                 position_errors, orientation_errors):
     """Create the three required plots"""
     
+    # Check if we have valid error data
+    if len(error_times) == 0:
+        print("Warning: No error data available for plotting")
+        return None
+    
     # Convert times to relative times (start from 0)
     exp_time_rel = exploration_times - exploration_times[0]
     error_time_rel = error_times - exploration_times[0]
@@ -301,6 +321,11 @@ def create_plots(exploration_times, exploration_rates, error_times,
     
     # Plot 1: Exploration rate vs time
     axes[0, 0].plot(exp_time_rel, exploration_rates, 'b-', linewidth=1.5)
+    # Add vertical line at the last error timestamp if different from exploration end
+    if error_time_rel[-1] < exp_time_rel[-1]:
+        axes[0, 0].axvline(x=error_time_rel[-1], color='red', linestyle='--', 
+                           label=f'Processing stopped at {error_time_rel[-1]:.1f}s')
+        axes[0, 0].legend()
     axes[0, 0].set_xlabel('Time (s)')
     axes[0, 0].set_ylabel('Exploration Rate')
     axes[0, 0].set_title('Exploration Rate vs Time')
@@ -308,6 +333,8 @@ def create_plots(exploration_times, exploration_rates, error_times,
     
     # Plot 2: Position error vs time
     axes[0, 1].plot(error_time_rel, position_errors, 'r-', linewidth=1.5, label='Position Error')
+    # Add horizontal line at 2.0m threshold
+    axes[0, 1].axhline(y=2.0, color='red', linestyle='--', alpha=0.7, label='2.0m threshold')
     axes[0, 1].set_xlabel('Time (s)')
     axes[0, 1].set_ylabel('Position Error (m)')
     axes[0, 1].set_title('Position Error vs Time')
@@ -317,11 +344,15 @@ def create_plots(exploration_times, exploration_rates, error_times,
     # Plot 3: Orientation error vs time
     axes[1, 0].plot(error_time_rel, np.degrees(orientation_errors), 'g-', 
                    linewidth=1.5, label='Orientation Error')
+    # Add vertical line at the last error timestamp
+    if error_time_rel[-1] < exp_time_rel[-1]:
+        axes[1, 0].axvline(x=error_time_rel[-1], color='red', linestyle='--', 
+                           label=f'Processing stopped at {error_time_rel[-1]:.1f}s')
+        axes[1, 0].legend()
     axes[1, 0].set_xlabel('Time (s)')
     axes[1, 0].set_ylabel('Orientation Error (degrees)')
     axes[1, 0].set_title('Orientation Error vs Time')
     axes[1, 0].grid(True, alpha=0.3)
-    axes[1, 0].legend()
     
     # Plot 4: Position error vs exploration rate
     valid_mask = ~np.isnan(exploration_rates_interp)
@@ -329,14 +360,22 @@ def create_plots(exploration_times, exploration_rates, error_times,
         axes[1, 1].scatter(exploration_rates_interp[valid_mask], 
                           position_errors[valid_mask], 
                           alpha=0.6, s=20, c='purple')
+        # Add horizontal line at 2.0m threshold
+        axes[1, 1].axhline(y=2.0, color='red', linestyle='--', alpha=0.7, label='2.0m threshold')
         axes[1, 1].set_xlabel('Exploration Rate')
         axes[1, 1].set_ylabel('Position Error (m)')
         axes[1, 1].set_title('Position Error vs Exploration Rate')
         axes[1, 1].grid(True, alpha=0.3)
+        axes[1, 1].legend()
     else:
         axes[1, 1].text(0.5, 0.5, 'No overlapping data', 
                        ha='center', va='center', transform=axes[1, 1].transAxes)
         axes[1, 1].set_title('Position Error vs Exploration Rate')
+    
+    # Add overall information about data range
+    if error_time_rel[-1] < exp_time_rel[-1]:
+        fig.text(0.5, 0.02, f'Note: Processing stopped at {error_time_rel[-1]:.1f}s due to position error > 2.0m', 
+                ha='center', va='bottom', fontsize=10, style='italic', color='red')
     
     plt.tight_layout()
     
@@ -349,6 +388,9 @@ def create_plots(exploration_times, exploration_rates, error_times,
     print(f"Orientation Error - Mean: {np.degrees(np.mean(orientation_errors)):.2f}°, "
           f"Std: {np.degrees(np.std(orientation_errors)):.2f}°, "
           f"Max: {np.degrees(np.max(orientation_errors)):.2f}°")
+    
+    if error_time_rel[-1] < exp_time_rel[-1]:
+        print(f"Data processing stopped at {error_time_rel[-1]:.1f}s due to large position error")
     
     return fig
 
@@ -380,6 +422,10 @@ def main():
     # Create plots
     fig = create_plots(exploration_times, exploration_rates, error_times, 
                       position_errors, orientation_errors)
+    
+    if fig is None:
+        print("Error: Failed to create plots")
+        return
     
     # Save or show plots
     if args.output:

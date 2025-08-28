@@ -5,12 +5,15 @@ ROS Bag Post-Processing Script
 This script processes a ROS bag file containing:
 - /exploration_rate (std_msgs/Float64 or similar float message)
 - /kingfisher/ground_truth/odometry (nav_msgs/Odometry)
-- /vins_estimator/odometry (nav_msgs/Odometry)
+- /ov_msckf/odometry (nav_msgs/Odometry)
+- /r2d2/point_cloud (sensor_msgs/PointCloud2)
+- /ov_msckf/loop_feats (sensor_msgs/PointCloud2)
 
-It generates three plots:
+It generates four plots:
 1. Exploration rate vs time
 2. Odometry error vs time
 3. Odometry error vs exploration rate
+4. 2D heatmap of feature point density
 """
 
 import rosbag
@@ -73,6 +76,8 @@ def process_rosbag(bag_path):
     exploration_data = []
     gt_odom_data = []
     vins_odom_data = []
+    r2d2_pointcloud_data = []
+    ov_msckf_pointcloud_data = []
     
     try:
         with rosbag.Bag(bag_path, 'r') as bag:
@@ -98,16 +103,24 @@ def process_rosbag(bag_path):
                 
                 elif topic == '/ov_msckf/loop_pose':
                     vins_odom_data.append([timestamp, msg])
+                
+                elif topic == '/r2d2/point_cloud':
+                    r2d2_pointcloud_data.append([timestamp, msg])
+                
+                elif topic == '/ov_msckf/loop_feats':
+                    ov_msckf_pointcloud_data.append([timestamp, msg])
     
     except Exception as e:
         print(f"Error reading bag file: {e}")
-        return None, None, None
+        return None, None, None, None, None
     
     print(f"Found {len(exploration_data)} exploration rate messages")
     print(f"Found {len(gt_odom_data)} ground truth odometry messages")
     print(f"Found {len(vins_odom_data)} VINS odometry messages")
+    print(f"Found {len(r2d2_pointcloud_data)} R2D2 point cloud messages")
+    print(f"Found {len(ov_msckf_pointcloud_data)} OV-MSCKF loop feature messages")
     
-    return exploration_data, gt_odom_data, vins_odom_data
+    return exploration_data, gt_odom_data, vins_odom_data, r2d2_pointcloud_data, ov_msckf_pointcloud_data
 
 def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_data):
     """Synchronize data and calculate odometry errors"""
@@ -286,6 +299,229 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
     return (exploration_times_filtered, exploration_rates_filtered,
             error_times, position_errors, orientation_errors)
 
+def process_pointcloud_data(r2d2_pointcloud_data, ov_msckf_pointcloud_data, 
+                           exploration_times, exploration_rates):
+    """Process PointCloud2 data and create density heatmaps"""
+    print("Processing PointCloud2 data for heatmap generation...")
+    
+    # Initialize arrays to store all u, v coordinates and intensities
+    r2d2_u_coords = []
+    r2d2_v_coords = []
+    r2d2_intensities = []
+    ov_msckf_u_coords = []
+    ov_msckf_v_coords = []
+    
+    # Process R2D2 point cloud data
+    for timestamp, msg in r2d2_pointcloud_data:
+        try:
+            # Check if this is PointCloud or PointCloud2
+            if hasattr(msg, 'fields'):
+                # PointCloud2 message
+                u_field = None
+                v_field = None
+                intensity_field = None
+                
+                for field in msg.fields:
+                    if field.name == 'u':
+                        u_field = field
+                    elif field.name == 'v':
+                        v_field = field
+                    elif field.name == 'intensity':
+                        intensity_field = field
+                
+                if u_field is not None and v_field is not None:
+                    # Calculate byte offsets
+                    u_offset = u_field.offset
+                    v_offset = v_field.offset
+                    intensity_offset = intensity_field.offset if intensity_field else None
+                    
+                    # Extract data for each point
+                    point_step = msg.point_step
+                    data = np.frombuffer(msg.data, dtype=np.uint8)
+                    
+                    for i in range(msg.width * msg.height):
+                        start_idx = i * point_step
+                        
+                        # Extract u, v coordinates
+                        u = np.frombuffer(data[start_idx + u_offset:start_idx + u_offset + 4], dtype=np.float32)[0]
+                        v = np.frombuffer(data[start_idx + v_offset:start_idx + v_offset + 4], dtype=np.float32)[0]
+                        
+                        # Extract intensity if available
+                        intensity = 1.0  # Default weight
+                        if intensity_field is not None:
+                            intensity = np.frombuffer(data[start_idx + intensity_offset:start_idx + intensity_offset + 4], dtype=np.float32)[0]
+                        
+                        r2d2_u_coords.append(u)
+                        r2d2_v_coords.append(v)
+                        r2d2_intensities.append(intensity)
+            else:
+                # PointCloud message - check if it has channels
+                if hasattr(msg, 'channels') and len(msg.channels) > 0:
+                    # Find u, v, and intensity channels
+                    u_channel = None
+                    v_channel = None
+                    intensity_channel = None
+                    
+                    for channel in msg.channels:
+                        if channel.name == 'u':
+                            u_channel = channel
+                        elif channel.name == 'v':
+                            v_channel = channel
+                        elif channel.name == 'intensity':
+                            intensity_channel = channel
+                    
+                    if u_channel is not None and v_channel is not None:
+                        # Extract coordinates and intensity from channels
+                        for i in range(len(msg.points)):
+                            u = u_channel.values[i]
+                            v = v_channel.values[i]
+                            intensity = intensity_channel.values[i] if intensity_channel else 1.0
+                            
+                            r2d2_u_coords.append(u)
+                            r2d2_v_coords.append(v)
+                            r2d2_intensities.append(intensity)
+                else:
+                    print(f"Warning: R2D2 PointCloud message has no channels or u/v coordinates")
+                    
+        except Exception as e:
+            print(f"Error processing R2D2 point cloud message: {e}")
+            continue
+    
+    # Process OV-MSCKF loop features data
+    for timestamp, msg in ov_msckf_pointcloud_data:
+        try:
+            # Check if this is PointCloud or PointCloud2
+            if hasattr(msg, 'fields'):
+                # PointCloud2 message
+                u_field = None
+                v_field = None
+                
+                for field in msg.fields:
+                    if field.name == 'u':
+                        u_field = field
+                    elif field.name == 'v':
+                        v_field = field
+                
+                if u_field is not None and v_field is not None:
+                    # Calculate byte offsets
+                    u_offset = u_field.offset
+                    v_offset = v_field.offset
+                    
+                    # Extract data for each point
+                    point_step = msg.point_step
+                    data = np.frombuffer(msg.data, dtype=np.uint8)
+                    
+                    for i in range(msg.width * msg.height):
+                        start_idx = i * point_step
+                        
+                        # Extract u, v coordinates
+                        u = np.frombuffer(data[start_idx + u_offset:start_idx + u_offset + 4], dtype=np.float32)[0]
+                        v = np.frombuffer(data[start_idx + v_offset:start_idx + v_offset + 4], dtype=np.float32)[0]
+                        
+                        ov_msckf_u_coords.append(u)
+                        ov_msckf_v_coords.append(v)
+            else:
+                # PointCloud message - check if it has channels
+                if hasattr(msg, 'channels') and len(msg.channels) > 0:
+                    # Find u and v channels
+                    u_channel = None
+                    v_channel = None
+                    
+                    for channel in msg.channels:
+                        if channel.name == 'u':
+                            u_channel = channel
+                        elif channel.name == 'v':
+                            v_channel = channel
+                    
+                    if u_channel is not None and v_channel is not None:
+                        # Extract coordinates from channels
+                        for i in range(len(msg.points)):
+                            u = u_channel.values[i]
+                            v = v_channel.values[i]
+                            
+                            ov_msckf_u_coords.append(u)
+                            ov_msckf_v_coords.append(v)
+                else:
+                    print(f"Warning: OV-MSCKF PointCloud message has no channels or u/v coordinates")
+                    
+        except Exception as e:
+            print(f"Error processing OV-MSCKF point cloud message: {e}")
+            continue
+    
+    print(f"Extracted {len(r2d2_u_coords)} R2D2 feature points")
+    print(f"Extracted {len(ov_msckf_u_coords)} OV-MSCKF loop feature points")
+    
+    return (r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
+            ov_msckf_u_coords, ov_msckf_v_coords)
+
+def create_heatmap(r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
+                   ov_msckf_u_coords, ov_msckf_v_coords, image_width=1920, image_height=1080):
+    """Create 2D heatmap showing feature point density"""
+    
+    # Create 2D histogram for R2D2 features (weighted by intensity)
+    if len(r2d2_u_coords) > 0:
+        r2d2_heatmap, x_edges, y_edges = np.histogram2d(
+            r2d2_u_coords, r2d2_v_coords, 
+            bins=[image_width//20, image_height//20],  # Adjust bin size as needed
+            range=[[0, image_width], [0, image_height]],
+            weights=r2d2_intensities
+        )
+    else:
+        r2d2_heatmap = np.zeros((image_height//20, image_width//20))
+        x_edges = np.linspace(0, image_width, image_width//20 + 1)
+        y_edges = np.linspace(0, image_height, image_height//20 + 1)
+    
+    # Create 2D histogram for OV-MSCKF features (unweighted)
+    if len(ov_msckf_u_coords) > 0:
+        ov_msckf_heatmap, _, _ = np.histogram2d(
+            ov_msckf_u_coords, ov_msckf_v_coords,
+            bins=[image_width//20, image_height//20],
+            range=[[0, image_width], [0, image_height]]
+        )
+    else:
+        ov_msckf_heatmap = np.zeros((image_height//20, image_width//20))
+    
+    # Create the heatmap plot
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+    fig.suptitle('Feature Point Density Heatmaps', fontsize=16, fontweight='bold')
+    
+    # R2D2 heatmap (weighted by intensity)
+    im1 = axes[0].imshow(r2d2_heatmap.T, origin='lower', 
+                         extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                         aspect='auto', cmap='viridis')
+    axes[0].set_title('R2D2 Feature Density (Intensity Weighted)')
+    axes[0].set_xlabel('Image U Coordinate (pixels)')
+    axes[0].set_ylabel('Image V Coordinate (pixels)')
+    plt.colorbar(im1, ax=axes[0], label='Weighted Density')
+    
+    # OV-MSCKF heatmap
+    im2 = axes[1].imshow(ov_msckf_heatmap.T, origin='lower',
+                         extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                         aspect='auto', cmap='viridis')
+    axes[1].set_title('OV-MSCKF Loop Feature Density')
+    axes[1].set_xlabel('Image U Coordinate (pixels)')
+    axes[1].set_ylabel('Image V Coordinate (pixels)')
+    plt.colorbar(im2, ax=axes[1], label='Feature Count')
+    
+    plt.tight_layout()
+    
+    # Print statistics
+    print("\n=== Feature Point Statistics ===")
+    if len(r2d2_u_coords) > 0:
+        print(f"R2D2 Features - Total: {len(r2d2_u_coords)}, "
+              f"Mean Intensity: {np.mean(r2d2_intensities):.3f}, "
+              f"Max Density: {np.max(r2d2_heatmap):.3f}")
+    else:
+        print("R2D2 Features - No data available")
+    
+    if len(ov_msckf_u_coords) > 0:
+        print(f"OV-MSCKF Features - Total: {len(ov_msckf_u_coords)}, "
+              f"Max Density: {np.max(ov_msckf_heatmap):.0f}")
+    else:
+        print("OV-MSCKF Features - No data available")
+    
+    return fig
+
 def interpolate_exploration_rate(exploration_times, exploration_rates, target_times):
     """Interpolate exploration rate to target timestamps"""
     if len(exploration_times) < 2:
@@ -400,11 +636,13 @@ def main():
     parser.add_argument('bag_file', help='Path to the ROS bag file')
     parser.add_argument('--output', '-o', help='Output plot file (optional)')
     parser.add_argument('--show', action='store_true', help='Show plots interactively')
+    parser.add_argument('--image-width', type=int, default=1280, help='Image width for heatmap (default: 1920)')
+    parser.add_argument('--image-height', type=int, default=640, help='Image height for heatmap (default: 1080)')
     
     args = parser.parse_args()
     
     # Process the bag file
-    exploration_data, gt_odom_data, vins_odom_data = process_rosbag(args.bag_file)
+    exploration_data, gt_odom_data, vins_odom_data, r2d2_pointcloud_data, ov_msckf_pointcloud_data = process_rosbag(args.bag_file)
     
     if not all([exploration_data, gt_odom_data, vins_odom_data]):
         print("Error: Failed to extract required data from bag file")
@@ -419,7 +657,28 @@ def main():
     
     exploration_times, exploration_rates, error_times, position_errors, orientation_errors = result
     
-    # Create plots
+    # Process PointCloud data and create heatmaps
+    pointcloud_result = process_pointcloud_data(r2d2_pointcloud_data, ov_msckf_pointcloud_data,
+                                              exploration_times, exploration_rates)
+    
+    if pointcloud_result[0] is not None:  # Check if we have any R2D2 data
+        r2d2_u_coords, r2d2_v_coords, r2d2_intensities, ov_msckf_u_coords, ov_msckf_v_coords = pointcloud_result
+        
+        # Create heatmap
+        heatmap_fig = create_heatmap(r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
+                                    ov_msckf_u_coords, ov_msckf_v_coords,
+                                    args.image_width, args.image_height)
+        
+        # Save heatmap separately
+        heatmap_output = args.bag_file.replace('.bag', '_heatmap.png')
+        heatmap_fig.savefig(heatmap_output, dpi=300, bbox_inches='tight')
+        print(f"Heatmap saved to: {heatmap_output}")
+        
+        if args.show:
+            plt.figure(heatmap_fig.number)
+            plt.show()
+    
+    # Create main plots
     fig = create_plots(exploration_times, exploration_rates, error_times, 
                       position_errors, orientation_errors)
     

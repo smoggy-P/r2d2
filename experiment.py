@@ -19,16 +19,18 @@ import psutil
 import logging
 
 class ExperimentRunner:
-    def __init__(self, world_name, total_experiments):
+    def __init__(self, world_name, total_experiments, max_exploration_time=300):
         self.world_name = world_name
         self.total_experiments = total_experiments
-        self.experiment_dir = f"experiment_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.max_exploration_time = max_exploration_time  # Maximum time to wait for exploration completion (seconds)
+        self.experiment_dir = "./experiments"
         self.log_file = os.path.join(self.experiment_dir, "experiment_log.txt")
         
         # Results tracking
         self.success_count = 0
         self.init_fail_count = 0
         self.init_drift_count = 0
+        self.exploration_fail_count = 0  # New counter for exploration failures
         
         # Process tracking
         self.processes = {}
@@ -286,9 +288,8 @@ class ExperimentRunner:
             self.window_ids['rosbag'] = self.get_window_id(f'Rosbag_Exp_{exp_num}')
             
             # 8. Monitor for "No frontiers found"
-            self.log_message("Monitoring for 'No frontiers found'...")
-            max_wait = 300  # Maximum wait time (5 minutes)
-            if self.wait_for_message(sim_log, "No frontiers found", max_wait):
+            self.log_message(f"Monitoring for 'No frontiers found' (max wait: {self.max_exploration_time} seconds)...")
+            if self.wait_for_message(sim_log, "No frontiers found", self.max_exploration_time):
                 self.log_message(f"Experiment {exp_num} completed successfully!", 'GREEN')
                 self.success_count += 1
                 
@@ -339,7 +340,11 @@ class ExperimentRunner:
                 
                 return True
             else:
-                self.log_message(f"Experiment {exp_num} timed out waiting for completion", 'RED')
+                self.log_message(f"Experiment {exp_num} exploration timed out after {self.max_exploration_time} seconds", 'RED')
+                self.exploration_fail_count += 1
+                
+                # Clean up all processes before starting next experiment
+                self.cleanup_terminals()
                 return False
                 
         except Exception as e:
@@ -390,6 +395,7 @@ class ExperimentRunner:
         self.log_message(f"Successful: {self.success_count}", 'GREEN')
         self.log_message(f"Initialization failures: {self.init_fail_count}", 'RED')
         self.log_message(f"Initialization drift: {self.init_drift_count}", 'RED')
+        self.log_message(f"Exploration failures: {self.exploration_fail_count}", 'RED')
         
         success_rate = (self.success_count * 100) / self.total_experiments
         self.log_message(f"Success rate: {success_rate:.2f}%")
@@ -405,6 +411,8 @@ def main():
     parser = argparse.ArgumentParser(description='Visual Odometry Simulation Experiment Script')
     parser.add_argument('world_name', help='Name of the world to use for experiments')
     parser.add_argument('total_experiments', type=int, help='Total number of experiments to run')
+    parser.add_argument('--max-exploration-time', type=int, default=300, 
+                       help='Maximum time to wait for exploration completion in seconds (default: 300)')
     
     args = parser.parse_args()
     
@@ -412,7 +420,7 @@ def main():
         print("Error: total_experiments must be a positive integer")
         sys.exit(1)
     
-    runner = ExperimentRunner(args.world_name, args.total_experiments)
+    runner = ExperimentRunner(args.world_name, args.total_experiments, args.max_exploration_time)
     runner.run_experiments()
 
 if __name__ == "__main__":

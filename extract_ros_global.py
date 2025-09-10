@@ -168,7 +168,7 @@ class R2D2GlobalFeatureNode:
                             x_world = depth_meters
                             y_world = -(x - self.cx) * depth_meters / self.fx
                             z_world = -(y - self.cy) * depth_meters / self.fy
-                            points.append([x_world, y_world, z_world, score])
+                            points.append([x_world, y_world, z_world, score, x, y])
 
             # Publish local point cloud
             if len(points) > 0:
@@ -176,7 +176,9 @@ class R2D2GlobalFeatureNode:
                     PointField('x', 0, PointField.FLOAT32, 1),
                     PointField('y', 4, PointField.FLOAT32, 1),
                     PointField('z', 8, PointField.FLOAT32, 1),
-                    PointField('intensity', 12, PointField.FLOAT32, 1)
+                    PointField('intensity', 12, PointField.FLOAT32, 1),
+                    PointField('u', 16, PointField.FLOAT32, 1),
+                    PointField('v', 20, PointField.FLOAT32, 1)
                 ]
                 header = msg.header
                 header.frame_id = "D435i_camera_depth_frame"

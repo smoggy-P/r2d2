@@ -50,7 +50,6 @@ class ExperimentRunner:
             level=logging.INFO,
             format='%(asctime)s - %(message)s',
             handlers=[
-                logging.FileHandler(self.log_file),
                 logging.StreamHandler(sys.stdout)
             ]
         )
@@ -102,9 +101,18 @@ class ExperimentRunner:
                 except (subprocess.TimeoutExpired, FileNotFoundError):
                     pass
         
+        # Kill Docker container processes
+        try:
+            # Kill Visual Odometry processes in Docker container
+            subprocess.run(['docker', 'exec', 'c1ad613f28a6', 'pkill', '-f', 'roslaunch.*subscribe.launch'], 
+                         timeout=10, capture_output=True)
+            subprocess.run(['docker', 'exec', 'c1ad613f28a6', 'pkill', '-f', 'ov_msckf'], 
+                         timeout=10, capture_output=True)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        
         # Kill any remaining ROS processes
         ros_processes = [
-            "roslaunch.*subscribe.launch",
             "roslaunch.*simulation.launch", 
             "python.*extract_ros_global.py",
             "rosbag.*record"
@@ -284,13 +292,50 @@ class ExperimentRunner:
                 self.log_message(f"Experiment {exp_num} completed successfully!", 'GREEN')
                 self.success_count += 1
                 
+                # Stop rosbag recording gracefully
+                self.log_message("Stopping rosbag recording...")
+                if 'rosbag' in self.processes and self.processes['rosbag']:
+                    try:
+                        # Send SIGINT to rosbag process to stop recording gracefully
+                        self.processes['rosbag'].send_signal(signal.SIGINT)
+                        self.processes['rosbag'].wait(timeout=10)
+                        self.log_message("Rosbag stopped successfully")
+                    except (subprocess.TimeoutExpired, ProcessLookupError):
+                        try:
+                            self.processes['rosbag'].kill()
+                        except ProcessLookupError:
+                            pass
+                
+                # Wait a bit more for file system to complete writing
+                time.sleep(3)
+                
                 # Copy rosbag to results directory
-                time.sleep(2)  # Give rosbag time to finish writing
                 bag_path = os.path.expanduser(f"~/workspace_ros1/r2d2/{bag_name}.bag")
                 if os.path.exists(bag_path):
                     dest_path = os.path.join(self.experiment_dir, f"{bag_name}.bag")
                     subprocess.run(['cp', bag_path, dest_path], timeout=10)
                     self.log_message(f"Rosbag saved to {dest_path}")
+                else:
+                    # Check for .bag.active file and try to fix it
+                    active_bag_path = os.path.expanduser(f"~/workspace_ros1/r2d2/{bag_name}.bag.active")
+                    if os.path.exists(active_bag_path):
+                        self.log_message("Found .bag.active file, attempting to fix...")
+                        try:
+                            # Use rosbag fix to convert .bag.active to .bag
+                            subprocess.run(['rosbag', 'reindex', active_bag_path], 
+                                        timeout=30, check=True)
+                            subprocess.run(['rosbag', 'fix', active_bag_path, bag_path], 
+                                        timeout=30, check=True)
+                            if os.path.exists(bag_path):
+                                dest_path = os.path.join(self.experiment_dir, f"{bag_name}.bag")
+                                subprocess.run(['cp', bag_path, dest_path], timeout=10)
+                                self.log_message(f"Fixed rosbag saved to {dest_path}")
+                            else:
+                                self.log_message("Failed to fix rosbag file", 'RED')
+                        except subprocess.CalledProcessError:
+                            self.log_message("Failed to fix rosbag file", 'RED')
+                    else:
+                        self.log_message("No rosbag file found", 'RED')
                 
                 return True
             else:

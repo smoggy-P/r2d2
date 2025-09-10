@@ -7,13 +7,14 @@ This script processes a ROS bag file containing:
 - /kingfisher/ground_truth/odometry (nav_msgs/Odometry)
 - /ov_msckf/odometry (nav_msgs/Odometry)
 - /r2d2/point_cloud (sensor_msgs/PointCloud2)
-- /ov_msckf/loop_feats (sensor_msgs/PointCloud2)
+- /ov_msckf/loop_feats (sensor_msgs/PointCloud)
 
-It generates four plots:
+It generates five plots:
 1. Exploration rate vs time
 2. Odometry error vs time
 3. Odometry error vs exploration rate
 4. 2D heatmap of feature point density
+5. Trajectory comparison (xyz positions)
 """
 
 import rosbag
@@ -126,7 +127,7 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
     """Synchronize data and calculate odometry errors"""
     if not all([exploration_data, gt_odom_data, vins_odom_data]):
         print("Error: Missing data for one or more topics")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None, None, None, None
     
     # Convert to numpy arrays for easier processing
     exploration_times = np.array([d[0] for d in exploration_data])
@@ -155,7 +156,7 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
     
     if first_gt_time is None or first_vins_time is None:
         print("Error: Cannot find first odometry messages")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None, None, None, None
     
     # Find the first timestamp when both are available (use the later one)
     first_common_time = max(first_gt_time, first_vins_time)
@@ -219,6 +220,16 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
     error_times = []
     position_errors = []
     orientation_errors = []
+    
+    # Store trajectory data for plotting
+    gt_trajectory_times = []
+    gt_trajectory_x = []
+    gt_trajectory_y = []
+    gt_trajectory_z = []
+    vins_trajectory_times = []
+    vins_trajectory_x = []
+    vins_trajectory_y = []
+    vins_trajectory_z = []
     
     # Flag to track if we should stop processing due to large position error
     stop_processing = False
@@ -284,11 +295,32 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
         error_times.append(vins_time)
         position_errors.append(pos_error)
         orientation_errors.append(orient_error)
+        
+        # Store trajectory data
+        gt_trajectory_times.append(gt_times[gt_idx])
+        gt_trajectory_x.append(gt_msg.pose.pose.position.x)
+        gt_trajectory_y.append(gt_msg.pose.pose.position.y)
+        gt_trajectory_z.append(gt_msg.pose.pose.position.z)
+        
+        vins_trajectory_times.append(vins_time)
+        vins_trajectory_x.append(aligned_vins_pos.x)
+        vins_trajectory_y.append(aligned_vins_pos.y)
+        vins_trajectory_z.append(aligned_vins_pos.z)
     
     # Convert to numpy arrays
     error_times = np.array(error_times)
     position_errors = np.array(position_errors)
     orientation_errors = np.array(orientation_errors)
+    
+    gt_trajectory_times = np.array(gt_trajectory_times)
+    gt_trajectory_x = np.array(gt_trajectory_x)
+    gt_trajectory_y = np.array(gt_trajectory_y)
+    gt_trajectory_z = np.array(gt_trajectory_z)
+    
+    vins_trajectory_times = np.array(vins_trajectory_times)
+    vins_trajectory_x = np.array(vins_trajectory_x)
+    vins_trajectory_y = np.array(vins_trajectory_y)
+    vins_trajectory_z = np.array(vins_trajectory_z)
     
     if stop_processing:
         print(f"Processing stopped at timestamp {stop_timestamp:.2f}s due to large position error")
@@ -297,12 +329,14 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
         print(f"Calculated {len(error_times)} error measurements after alignment")
     
     return (exploration_times_filtered, exploration_rates_filtered,
-            error_times, position_errors, orientation_errors)
+            error_times, position_errors, orientation_errors,
+            gt_trajectory_times, gt_trajectory_x, gt_trajectory_y, gt_trajectory_z,
+            vins_trajectory_times, vins_trajectory_x, vins_trajectory_y, vins_trajectory_z)
 
 def process_pointcloud_data(r2d2_pointcloud_data, ov_msckf_pointcloud_data, 
                            exploration_times, exploration_rates):
-    """Process PointCloud2 data and create density heatmaps"""
-    print("Processing PointCloud2 data for heatmap generation...")
+    """Process PointCloud data and create density heatmaps"""
+    print("Processing PointCloud data for heatmap generation...")
     
     # Initialize arrays to store all u, v coordinates and intensities
     r2d2_u_coords = []
@@ -423,26 +457,20 @@ def process_pointcloud_data(r2d2_pointcloud_data, ov_msckf_pointcloud_data,
             else:
                 # PointCloud message - check if it has channels
                 if hasattr(msg, 'channels') and len(msg.channels) > 0:
-                    # Find u and v channels
-                    u_channel = None
-                    v_channel = None
-                    
+                    # For OV-MSCKF, each channel contains [x, y, z, u, v] values
+                    # We need to extract u and v from the 3rd and 4th positions
                     for channel in msg.channels:
-                        if channel.name == 'u':
-                            u_channel = channel
-                        elif channel.name == 'v':
-                            v_channel = channel
-                    
-                    if u_channel is not None and v_channel is not None:
-                        # Extract coordinates from channels
-                        for i in range(len(msg.points)):
-                            u = u_channel.values[i]
-                            v = v_channel.values[i]
+                        if len(channel.values) >= 5:  # Ensure we have at least 5 values
+                            # Extract u and v coordinates (3rd and 4th values)
+                            u = channel.values[2]  # 3rd value (index 2)
+                            v = channel.values[3]  # 4th value (index 3)
                             
                             ov_msckf_u_coords.append(u)
                             ov_msckf_v_coords.append(v)
+                        else:
+                            print(f"Warning: Channel has insufficient values: {len(channel.values)}")
                 else:
-                    print(f"Warning: OV-MSCKF PointCloud message has no channels or u/v coordinates")
+                    print(f"Warning: OV-MSCKF PointCloud message has no channels")
                     
         except Exception as e:
             print(f"Error processing OV-MSCKF point cloud message: {e}")
@@ -455,50 +483,54 @@ def process_pointcloud_data(r2d2_pointcloud_data, ov_msckf_pointcloud_data,
             ov_msckf_u_coords, ov_msckf_v_coords)
 
 def create_heatmap(r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
-                   ov_msckf_u_coords, ov_msckf_v_coords, image_width=1920, image_height=1080):
+                   ov_msckf_u_coords, ov_msckf_v_coords, 
+                   r2d2_width=1280, r2d2_height=640,
+                   ov_width=1920, ov_height=1080):
     """Create 2D heatmap showing feature point density"""
     
     # Create 2D histogram for R2D2 features (weighted by intensity)
     if len(r2d2_u_coords) > 0:
-        r2d2_heatmap, x_edges, y_edges = np.histogram2d(
+        r2d2_heatmap, r2d2_x_edges, r2d2_y_edges = np.histogram2d(
             r2d2_u_coords, r2d2_v_coords, 
-            bins=[image_width//20, image_height//20],  # Adjust bin size as needed
-            range=[[0, image_width], [0, image_height]],
+            bins=[r2d2_width//20, r2d2_height//20],  # Adjust bin size as needed
+            range=[[0, r2d2_width], [0, r2d2_height]],
             weights=r2d2_intensities
         )
     else:
-        r2d2_heatmap = np.zeros((image_height//20, image_width//20))
-        x_edges = np.linspace(0, image_width, image_width//20 + 1)
-        y_edges = np.linspace(0, image_height, image_height//20 + 1)
+        r2d2_heatmap = np.zeros((r2d2_height//20, r2d2_width//20))
+        r2d2_x_edges = np.linspace(0, r2d2_width, r2d2_width//20 + 1)
+        r2d2_y_edges = np.linspace(0, r2d2_height, r2d2_height//20 + 1)
     
     # Create 2D histogram for OV-MSCKF features (unweighted)
     if len(ov_msckf_u_coords) > 0:
-        ov_msckf_heatmap, _, _ = np.histogram2d(
+        ov_msckf_heatmap, ov_x_edges, ov_y_edges = np.histogram2d(
             ov_msckf_u_coords, ov_msckf_v_coords,
-            bins=[image_width//20, image_height//20],
-            range=[[0, image_width], [0, image_height]]
+            bins=[ov_width//20, ov_height//20],
+            range=[[0, ov_width], [0, ov_height]]
         )
     else:
-        ov_msckf_heatmap = np.zeros((image_height//20, image_width//20))
+        ov_msckf_heatmap = np.zeros((ov_height//20, ov_width//20))
+        ov_x_edges = np.linspace(0, ov_width, ov_width//20 + 1)
+        ov_y_edges = np.linspace(0, ov_height, ov_height//20 + 1)
     
     # Create the heatmap plot
     fig, axes = plt.subplots(1, 2, figsize=(16, 8))
     fig.suptitle('Feature Point Density Heatmaps', fontsize=16, fontweight='bold')
     
-    # R2D2 heatmap (weighted by intensity)
+    # R2D2 heatmap (weighted by intensity) - 1280x640
     im1 = axes[0].imshow(r2d2_heatmap.T, origin='lower', 
-                         extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                         extent=[r2d2_x_edges[0], r2d2_x_edges[-1], r2d2_y_edges[0], r2d2_y_edges[-1]],
                          aspect='auto', cmap='viridis')
-    axes[0].set_title('R2D2 Feature Density (Intensity Weighted)')
+    axes[0].set_title(f'R2D2 Feature Density (Intensity Weighted)')
     axes[0].set_xlabel('Image U Coordinate (pixels)')
     axes[0].set_ylabel('Image V Coordinate (pixels)')
     plt.colorbar(im1, ax=axes[0], label='Weighted Density')
     
-    # OV-MSCKF heatmap
+    # OV-MSCKF heatmap - 1920x1080
     im2 = axes[1].imshow(ov_msckf_heatmap.T, origin='lower',
-                         extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+                         extent=[ov_x_edges[0], ov_x_edges[-1], ov_y_edges[0], ov_y_edges[-1]],
                          aspect='auto', cmap='viridis')
-    axes[1].set_title('OV-MSCKF Loop Feature Density')
+    axes[1].set_title(f'OV-MSCKF Loop Feature Density')
     axes[1].set_xlabel('Image U Coordinate (pixels)')
     axes[1].set_ylabel('Image V Coordinate (pixels)')
     plt.colorbar(im2, ax=axes[1], label='Feature Count')
@@ -511,12 +543,14 @@ def create_heatmap(r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
         print(f"R2D2 Features - Total: {len(r2d2_u_coords)}, "
               f"Mean Intensity: {np.mean(r2d2_intensities):.3f}, "
               f"Max Density: {np.max(r2d2_heatmap):.3f}")
+        print(f"R2D2 Image Size: {r2d2_width}x{r2d2_height}")
     else:
         print("R2D2 Features - No data available")
     
     if len(ov_msckf_u_coords) > 0:
         print(f"OV-MSCKF Features - Total: {len(ov_msckf_u_coords)}, "
               f"Max Density: {np.max(ov_msckf_heatmap):.0f}")
+        print(f"OV-MSCKF Image Size: {ov_width}x{ov_height}")
     else:
         print("OV-MSCKF Features - No data available")
     
@@ -534,8 +568,10 @@ def interpolate_exploration_rate(exploration_times, exploration_rates, target_ti
     return interp_func(target_times)
 
 def create_plots(exploration_times, exploration_rates, error_times, 
-                position_errors, orientation_errors):
-    """Create the three required plots"""
+                position_errors, orientation_errors, gt_trajectory_times,
+                gt_trajectory_x, gt_trajectory_y, gt_trajectory_z,
+                vins_trajectory_times, vins_trajectory_x, vins_trajectory_y, vins_trajectory_z):
+    """Create the required plots including trajectory comparison"""
     
     # Check if we have valid error data
     if len(error_times) == 0:
@@ -545,14 +581,16 @@ def create_plots(exploration_times, exploration_rates, error_times,
     # Convert times to relative times (start from 0)
     exp_time_rel = exploration_times - exploration_times[0]
     error_time_rel = error_times - exploration_times[0]
+    gt_traj_time_rel = gt_trajectory_times - exploration_times[0]
+    vins_traj_time_rel = vins_trajectory_times - exploration_times[0]
     
     # Interpolate exploration rates to error timestamps
     exploration_rates_interp = interpolate_exploration_rate(
         exploration_times, exploration_rates, error_times
     )
     
-    # Create figure with subplots
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    # Create figure with subplots (2x3 layout for 6 plots)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
     fig.suptitle('ROS Bag Analysis Results', fontsize=16, fontweight='bold')
     
     # Plot 1: Exploration rate vs time
@@ -578,35 +616,53 @@ def create_plots(exploration_times, exploration_rates, error_times,
     axes[0, 1].legend()
     
     # Plot 3: Orientation error vs time
-    axes[1, 0].plot(error_time_rel, np.degrees(orientation_errors), 'g-', 
+    axes[0, 2].plot(error_time_rel, np.degrees(orientation_errors), 'g-', 
                    linewidth=1.5, label='Orientation Error')
     # Add vertical line at the last error timestamp
     if error_time_rel[-1] < exp_time_rel[-1]:
-        axes[1, 0].axvline(x=error_time_rel[-1], color='red', linestyle='--', 
+        axes[0, 2].axvline(x=error_time_rel[-1], color='red', linestyle='--', 
                            label=f'Processing stopped at {error_time_rel[-1]:.1f}s')
-        axes[1, 0].legend()
-    axes[1, 0].set_xlabel('Time (s)')
-    axes[1, 0].set_ylabel('Orientation Error (degrees)')
-    axes[1, 0].set_title('Orientation Error vs Time')
-    axes[1, 0].grid(True, alpha=0.3)
+        axes[0, 2].legend()
+    axes[0, 2].set_xlabel('Time (s)')
+    axes[0, 2].set_ylabel('Orientation Error (degrees)')
+    axes[0, 2].set_title('Orientation Error vs Time')
+    axes[0, 2].grid(True, alpha=0.3)
     
     # Plot 4: Position error vs exploration rate
     valid_mask = ~np.isnan(exploration_rates_interp)
     if np.any(valid_mask):
-        axes[1, 1].scatter(exploration_rates_interp[valid_mask], 
+        axes[1, 0].scatter(exploration_rates_interp[valid_mask], 
                           position_errors[valid_mask], 
                           alpha=0.6, s=20, c='purple')
         # Add horizontal line at 2.0m threshold
-        axes[1, 1].axhline(y=2.0, color='red', linestyle='--', alpha=0.7, label='2.0m threshold')
-        axes[1, 1].set_xlabel('Exploration Rate')
-        axes[1, 1].set_ylabel('Position Error (m)')
-        axes[1, 1].set_title('Position Error vs Exploration Rate')
-        axes[1, 1].grid(True, alpha=0.3)
-        axes[1, 1].legend()
+        axes[1, 0].axhline(y=2.0, color='red', linestyle='--', alpha=0.7, label='2.0m threshold')
+        axes[1, 0].set_xlabel('Exploration Rate')
+        axes[1, 0].set_ylabel('Position Error (m)')
+        axes[1, 0].set_title('Position Error vs Exploration Rate')
+        axes[1, 0].grid(True, alpha=0.3)
+        axes[1, 0].legend()
     else:
-        axes[1, 1].text(0.5, 0.5, 'No overlapping data', 
-                       ha='center', va='center', transform=axes[1, 1].transAxes)
-        axes[1, 1].set_title('Position Error vs Exploration Rate')
+        axes[1, 0].text(0.5, 0.5, 'No overlapping data', 
+                       ha='center', va='center', transform=axes[1, 0].transAxes)
+        axes[1, 0].set_title('Position Error vs Exploration Rate')
+    
+    # Plot 5: X trajectory comparison
+    axes[1, 1].plot(gt_traj_time_rel, gt_trajectory_x, 'b-', linewidth=2, label='Ground Truth', alpha=0.8)
+    axes[1, 1].plot(vins_traj_time_rel, vins_trajectory_x, 'r--', linewidth=2, label='VINS (Aligned)', alpha=0.8)
+    axes[1, 1].set_xlabel('Time (s)')
+    axes[1, 1].set_ylabel('X Position (m)')
+    axes[1, 1].set_title('X Trajectory Comparison')
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].legend()
+    
+    # Plot 6: Y trajectory comparison
+    axes[1, 2].plot(gt_traj_time_rel, gt_trajectory_y, 'b-', linewidth=2, label='Ground Truth', alpha=0.8)
+    axes[1, 2].plot(vins_traj_time_rel, vins_trajectory_y, 'r--', linewidth=2, label='VINS (Aligned)', alpha=0.8)
+    axes[1, 2].set_xlabel('Time (s)')
+    axes[1, 2].set_ylabel('Y Position (m)')
+    axes[1, 2].set_title('Y Trajectory Comparison')
+    axes[1, 2].grid(True, alpha=0.3)
+    axes[1, 2].legend()
     
     # Add overall information about data range
     if error_time_rel[-1] < exp_time_rel[-1]:
@@ -636,8 +692,8 @@ def main():
     parser.add_argument('bag_file', help='Path to the ROS bag file')
     parser.add_argument('--output', '-o', help='Output plot file (optional)')
     parser.add_argument('--show', action='store_true', help='Show plots interactively')
-    parser.add_argument('--image-width', type=int, default=1280, help='Image width for heatmap (default: 1920)')
-    parser.add_argument('--image-height', type=int, default=640, help='Image height for heatmap (default: 1080)')
+    parser.add_argument('--image-width', type=int, default=1280, help='Image width for R2D2 heatmap (default: 1280)')
+    parser.add_argument('--image-height', type=int, default=640, help='Image height for R2D2 heatmap (default: 640)')
     
     args = parser.parse_args()
     
@@ -655,7 +711,9 @@ def main():
         print("Error: Failed to synchronize data and calculate errors")
         return
     
-    exploration_times, exploration_rates, error_times, position_errors, orientation_errors = result
+    (exploration_times, exploration_rates, error_times, position_errors, orientation_errors,
+     gt_trajectory_times, gt_trajectory_x, gt_trajectory_y, gt_trajectory_z,
+     vins_trajectory_times, vins_trajectory_x, vins_trajectory_y, vins_trajectory_z) = result
     
     # Process PointCloud data and create heatmaps
     pointcloud_result = process_pointcloud_data(r2d2_pointcloud_data, ov_msckf_pointcloud_data,
@@ -664,10 +722,11 @@ def main():
     if pointcloud_result[0] is not None:  # Check if we have any R2D2 data
         r2d2_u_coords, r2d2_v_coords, r2d2_intensities, ov_msckf_u_coords, ov_msckf_v_coords = pointcloud_result
         
-        # Create heatmap
+        # Create heatmap with different image sizes for R2D2 and OV-MSCKF
         heatmap_fig = create_heatmap(r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
                                     ov_msckf_u_coords, ov_msckf_v_coords,
-                                    args.image_width, args.image_height)
+                                    r2d2_width=1280, r2d2_height=640,
+                                    ov_width=1920, ov_height=1080)
         
         # Save heatmap separately
         heatmap_output = args.bag_file.replace('.bag', '_heatmap.png')
@@ -680,7 +739,9 @@ def main():
     
     # Create main plots
     fig = create_plots(exploration_times, exploration_rates, error_times, 
-                      position_errors, orientation_errors)
+                      position_errors, orientation_errors,
+                      gt_trajectory_times, gt_trajectory_x, gt_trajectory_y, gt_trajectory_z,
+                      vins_trajectory_times, vins_trajectory_x, vins_trajectory_y, vins_trajectory_z)
     
     if fig is None:
         print("Error: Failed to create plots")

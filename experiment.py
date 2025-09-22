@@ -19,13 +19,14 @@ import psutil
 import logging
 
 class ExperimentRunner:
-    def __init__(self, world_name, total_experiments, max_exploration_time=300):
+    def __init__(self, world_name, total_experiments, max_exploration_time=300, method='vo_safe'):
         self.world_name = world_name
         self.total_experiments = total_experiments
         self.max_exploration_time = max_exploration_time  # Maximum time to wait for exploration completion (seconds)
         self.experiment_dir = "./experiments"
         self.log_file = os.path.join(self.experiment_dir, "experiment_log.txt")
-        
+        self.method = method
+
         # Results tracking
         self.success_count = 0
         self.init_fail_count = 0
@@ -194,10 +195,11 @@ class ExperimentRunner:
         # Create temporary log files
         vo_log = f"/tmp/vo_log_{exp_num}.txt"
         sim_log = f"/tmp/sim_log_{exp_num}.txt"
-        r2d2_log = f"/tmp/r2d2_log_{exp_num}.txt"
+        r2d2_log = f"/tmp/r2d2_log_{exp_num}.txt"  
+        fuel_log = f"/tmp/fuel_log_{exp_num}.txt"
         
         # Clean up any existing log files
-        for log_file in [vo_log, sim_log, r2d2_log]:
+        for log_file in [vo_log, sim_log, r2d2_log, fuel_log]:
             try:
                 os.remove(log_file)
             except FileNotFoundError:
@@ -217,16 +219,29 @@ class ExperimentRunner:
             
             # 2. Start Simulation in new terminal
             self.log_message("Starting Simulation...")
-            sim_cmd = [
-                'gnome-terminal', '--title', f'Sim_Exp_{exp_num}',
-                '--', 'bash', '-c',
-                f"""cd ~/workspace_ros1/vo_safe_ws && 
-                source ~/.bashrc &&
-                eval "$(conda shell.bash hook)" &&
-                conda deactivate &&
-                source devel/setup.bash --extend &&
-                roslaunch agiros simulation.launch world_name:="/home/smoggy/workspace_ros1/vo_safe_ws/src/vo_safe_exploration/vo_safe_frontier/experiment/worlds/test_features.world" 2>&1 | tee '{sim_log}'; read -p 'Press Enter to close...'"""
-            ]
+            if self.method == 'vo_safe':
+                sim_cmd = [
+                    'gnome-terminal', '--title', f'Sim_Exp_{exp_num}',
+                    '--', 'bash', '-c',
+                    f"""cd ~/workspace_ros1/vo_safe_ws && 
+                    source ~/.bashrc &&
+                    eval "$(conda shell.bash hook)" &&
+                    conda deactivate &&
+                    source devel/setup.bash --extend &&
+                    roslaunch agiros simulation.launch world_name:="/home/smoggy/workspace_ros1/vo_safe_ws/src/vo_safe_exploration/vo_safe_frontier/experiment/worlds/test_features.world" 2>&1 | tee '{sim_log}'; read -p 'Press Enter to close...'"""
+                ]
+            else:
+                sim_cmd = [
+                    'gnome-terminal', '--title', f'Sim_Exp_{exp_num}',
+                    '--', 'bash', '-c',
+                    f"""cd ~/workspace_ros1/vo_safe_ws && 
+                    source ~/.bashrc &&
+                    eval "$(conda shell.bash hook)" &&
+                    conda deactivate &&
+                    source devel/setup.bash --extend &&
+                    roslaunch agiros simulation_fuel.launch world_name:="/home/smoggy/workspace_ros1/vo_safe_ws/src/vo_safe_exploration/vo_safe_frontier/experiment/worlds/test_features.world" 2>&1 | tee '{sim_log}'; read -p 'Press Enter to close...'"""
+                ]
+
             self.processes['sim'] = subprocess.Popen(sim_cmd)
             time.sleep(2)
             self.window_ids['sim'] = self.get_window_id(f'Sim_Exp_{exp_num}')
@@ -273,6 +288,23 @@ class ExperimentRunner:
             self.processes['r2d2'] = subprocess.Popen(r2d2_cmd)
             time.sleep(2)
             self.window_ids['r2d2'] = self.get_window_id(f'R2D2_Exp_{exp_num}')
+
+            if self.method == 'fuel':
+                self.log_message("Starting Fuel...")
+                fuel_cmd = [
+                    'gnome-terminal', '--title', f'Fuel_Exp_{exp_num}',
+                    '--', 'bash', '-c',
+                    f"docker exec -it 09c1ac37930c bash -c 'cd ~/fuel_ws && source devel/setup.bash && roslaunch exploration_manager exploration.launch' 2>&1 | tee '{fuel_log}'; read -p 'Press Enter to close...'"
+                ]
+                self.processes['fuel'] = subprocess.Popen(fuel_cmd)
+                time.sleep(2)
+                self.window_ids['fuel'] = self.get_window_id(f'Fuel_Exp_{exp_num}')
+                subprocess.run(['rostopic', 'pub', '-1', '/move_base_simple/goal',
+                                'geometry_msgs/PoseStamped',
+                                '{ header: { stamp: now, frame_id: "map" }, '
+                                'pose: { position: {x: 1.0, y: 2.0, z: 0.0}, '
+                                'orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0} } }'
+                            ], timeout=10)
             
             # 7. Start rosbag recording in new terminal
             bag_name = f"{self.world_name}_exp_{exp_num}_{datetime.now().strftime('%H%M%S')}"
@@ -288,8 +320,17 @@ class ExperimentRunner:
             self.window_ids['rosbag'] = self.get_window_id(f'Rosbag_Exp_{exp_num}')
             
             # 8. Monitor for "No frontiers found"
-            self.log_message(f"Monitoring for 'No frontiers found' (max wait: {self.max_exploration_time} seconds)...")
-            if self.wait_for_message(sim_log, "No frontiers found", self.max_exploration_time):
+            if self.method == 'vo_safe':
+                end_message = "No frontiers found"
+                monitored_log = sim_log
+            elif self.method == 'fuel':
+                end_message = "No coverable frontier."
+                monitored_log = fuel_log
+            else:
+                end_message = "No frontiers found"
+                monitored_log = sim_log
+            self.log_message(f"Monitoring for '{end_message}' (max wait: {self.max_exploration_time} seconds)...")
+            if self.wait_for_message(monitored_log, end_message, self.max_exploration_time):
                 self.log_message(f"Experiment {exp_num} completed successfully!", 'GREEN')
                 self.success_count += 1
                 
@@ -413,14 +454,15 @@ def main():
     parser.add_argument('total_experiments', type=int, help='Total number of experiments to run')
     parser.add_argument('--max-exploration-time', type=int, default=300, 
                        help='Maximum time to wait for exploration completion in seconds (default: 300)')
-    
+    parser.add_argument('--method', type=str, default='vo_safe',
+                       help='Method to use for exploration (default: vo_safe)')
     args = parser.parse_args()
     
     if args.total_experiments <= 0:
         print("Error: total_experiments must be a positive integer")
         sys.exit(1)
     
-    runner = ExperimentRunner(args.world_name, args.total_experiments, args.max_exploration_time)
+    runner = ExperimentRunner(args.world_name, args.total_experiments, args.max_exploration_time, args.method)
     runner.run_experiments()
 
 if __name__ == "__main__":

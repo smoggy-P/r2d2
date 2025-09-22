@@ -26,7 +26,9 @@ class ExperimentRunner:
         self.experiment_dir = "./experiments"
         self.log_file = os.path.join(self.experiment_dir, "experiment_log.txt")
         self.method = method
-
+        # Subdirectory per method for bag files
+        self.method_dir = os.path.join(self.experiment_dir, str(self.method))
+        
         # Results tracking
         self.success_count = 0
         self.init_fail_count = 0
@@ -39,6 +41,7 @@ class ExperimentRunner:
         
         # Create experiment directory first
         os.makedirs(self.experiment_dir, exist_ok=True)
+        os.makedirs(self.method_dir, exist_ok=True)
         
         # Setup logging after directory is created
         self.setup_logging()
@@ -160,9 +163,9 @@ class ExperimentRunner:
                     content = f.read()
                     
                 # Extract distance value using regex
-                distance_match = re.search(r'dist = ([0-9.]+)', content)
-                if distance_match:
-                    distance = float(distance_match.group(1))
+                matches = re.findall(r'dist\s*=\s*[^0-9-]*([0-9]+(?:\.[0-9]+)?)', content)
+                if matches:
+                    distance = float(matches[-1])
                     
                     if distance > 1.0:
                         self.log_message(f"Distance drift detected: {distance} meters", 'RED')
@@ -211,7 +214,7 @@ class ExperimentRunner:
             vo_cmd = [
                 'gnome-terminal', '--title', f'VO_Exp_{exp_num}',
                 '--', 'bash', '-c',
-                f"docker exec -it c1ad613f28a6 bash -c 'source /catkin_ws/devel/setup.bash && roslaunch ov_msckf subscribe.launch config:=agiros' 2>&1 | tee '{vo_log}'; read -p 'Press Enter to close...'"
+                f"docker exec -it c1ad613f28a6 bash -c 'source /catkin_ws/devel/setup.bash && roslaunch ov_msckf subscribe.launch config:=agiros' 2>&1 | tee '{vo_log}'"
             ]
             self.processes['vo'] = subprocess.Popen(vo_cmd)
             time.sleep(2)
@@ -228,7 +231,7 @@ class ExperimentRunner:
                     eval "$(conda shell.bash hook)" &&
                     conda deactivate &&
                     source devel/setup.bash --extend &&
-                    roslaunch agiros simulation.launch world_name:="/home/smoggy/workspace_ros1/vo_safe_ws/src/vo_safe_exploration/vo_safe_frontier/experiment/worlds/test_features.world" 2>&1 | tee '{sim_log}'; read -p 'Press Enter to close...'"""
+                    roslaunch agiros simulation.launch world_name:="/home/smoggy/workspace_ros1/vo_safe_ws/src/vo_safe_exploration/vo_safe_frontier/experiment/worlds/test_features.world" 2>&1 | tee '{sim_log}'"""
                 ]
             else:
                 sim_cmd = [
@@ -239,7 +242,7 @@ class ExperimentRunner:
                     eval "$(conda shell.bash hook)" &&
                     conda deactivate &&
                     source devel/setup.bash --extend &&
-                    roslaunch agiros simulation_fuel.launch world_name:="/home/smoggy/workspace_ros1/vo_safe_ws/src/vo_safe_exploration/vo_safe_frontier/experiment/worlds/test_features.world" 2>&1 | tee '{sim_log}'; read -p 'Press Enter to close...'"""
+                    roslaunch agiros simulation_fuel.launch world_name:="/home/smoggy/workspace_ros1/vo_safe_ws/src/vo_safe_exploration/vo_safe_frontier/experiment/worlds/test_features.world" 2>&1 | tee '{sim_log}'"""
                 ]
 
             self.processes['sim'] = subprocess.Popen(sim_cmd)
@@ -283,7 +286,7 @@ class ExperimentRunner:
                 source ~/.bashrc &&
                 eval "$(conda shell.bash hook)" &&
                 conda activate r2d2-gpu && 
-                python extract_ros_global.py 2>&1 | tee '{r2d2_log}'; read -p 'Press Enter to close...'"""
+                python extract_ros_global.py 2>&1 | tee '{r2d2_log}'"""
             ]
             self.processes['r2d2'] = subprocess.Popen(r2d2_cmd)
             time.sleep(2)
@@ -294,7 +297,7 @@ class ExperimentRunner:
                 fuel_cmd = [
                     'gnome-terminal', '--title', f'Fuel_Exp_{exp_num}',
                     '--', 'bash', '-c',
-                    f"docker exec -it 09c1ac37930c bash -c 'cd ~/fuel_ws && source devel/setup.bash && roslaunch exploration_manager exploration.launch' 2>&1 | tee '{fuel_log}'; read -p 'Press Enter to close...'"
+                    f"docker exec -it 09c1ac37930c bash -c 'cd ~/fuel_ws && source devel/setup.bash && roslaunch exploration_manager exploration.launch' 2>&1 | tee '{fuel_log}'"
                 ]
                 self.processes['fuel'] = subprocess.Popen(fuel_cmd)
                 time.sleep(2)
@@ -309,11 +312,14 @@ class ExperimentRunner:
             # 7. Start rosbag recording in new terminal
             bag_name = f"{self.world_name}_exp_{exp_num}_{datetime.now().strftime('%H%M%S')}"
             self.log_message(f"Starting rosbag recording: {bag_name}")
+            bag_output_dir = os.path.abspath(os.path.join(self.experiment_dir, self.method))
+            os.makedirs(bag_output_dir, exist_ok=True)
+            bag_output_base = os.path.join(bag_output_dir, bag_name)
             rosbag_cmd = [
                 'gnome-terminal', '--title', f'Rosbag_Exp_{exp_num}',
                 '--', 'bash', '-c',
                 f"""cd ~/workspace_ros1/r2d2 && 
-                rosbag record -O '{bag_name}' /ov_msckf/loop_pose /kingfisher/ground_truth/odometry /exploration_rate /ov_msckf/loop_feats /r2d2/point_cloud /sdf_map/occupancy_all /sdf_map/occupancy_local /r2d2/global_feature_map; read -p 'Press Enter to close...'"""
+                rosbag record -O '{bag_output_base}' /ov_msckf/loop_pose /kingfisher/ground_truth/odometry /exploration_rate /ov_msckf/loop_feats /r2d2/point_cloud /sdf_map/occupancy_all /sdf_map/occupancy_local /r2d2/global_feature_map"""
             ]
             self.processes['rosbag'] = subprocess.Popen(rosbag_cmd)
             time.sleep(2)
@@ -351,38 +357,73 @@ class ExperimentRunner:
                 # Wait a bit more for file system to complete writing
                 time.sleep(3)
                 
-                # Copy rosbag to results directory
-                bag_path = os.path.expanduser(f"~/workspace_ros1/r2d2/{bag_name}.bag")
+                # Finalize bag and cleanup residual files
+                bag_path = f"{bag_output_base}.bag"
+                active_bag_path = f"{bag_output_base}.bag.active"
+                orig_active_bag_path = f"{bag_output_base}.bag.orig.active"
+
+                if not os.path.exists(bag_path) and os.path.exists(active_bag_path):
+                    self.log_message("Found .bag.active file, attempting to finalize...")
+                    try:
+                        # Use rosbag fix to convert .bag.active to .bag
+                        subprocess.run(['rosbag', 'reindex', active_bag_path], 
+                                    timeout=30, check=True)
+                        subprocess.run(['rosbag', 'fix', active_bag_path, bag_path], 
+                                    timeout=60, check=True)
+                    except subprocess.CalledProcessError:
+                        self.log_message("Failed to finalize rosbag from .active file", 'RED')
+                
+                # Cleanup residual .active files
+                for leftover in [active_bag_path, orig_active_bag_path]:
+                    try:
+                        if os.path.exists(leftover):
+                            os.remove(leftover)
+                    except Exception:
+                        pass
+                
                 if os.path.exists(bag_path):
-                    dest_path = os.path.join(self.experiment_dir, f"{bag_name}.bag")
-                    subprocess.run(['cp', bag_path, dest_path], timeout=10)
-                    self.log_message(f"Rosbag saved to {dest_path}")
+                    self.log_message(f"Rosbag saved to {bag_path}")
                 else:
-                    # Check for .bag.active file and try to fix it
-                    active_bag_path = os.path.expanduser(f"~/workspace_ros1/r2d2/{bag_name}.bag.active")
-                    if os.path.exists(active_bag_path):
-                        self.log_message("Found .bag.active file, attempting to fix...")
-                        try:
-                            # Use rosbag fix to convert .bag.active to .bag
-                            subprocess.run(['rosbag', 'reindex', active_bag_path], 
-                                        timeout=30, check=True)
-                            subprocess.run(['rosbag', 'fix', active_bag_path, bag_path], 
-                                        timeout=30, check=True)
-                            if os.path.exists(bag_path):
-                                dest_path = os.path.join(self.experiment_dir, f"{bag_name}.bag")
-                                subprocess.run(['cp', bag_path, dest_path], timeout=10)
-                                self.log_message(f"Fixed rosbag saved to {dest_path}")
-                            else:
-                                self.log_message("Failed to fix rosbag file", 'RED')
-                        except subprocess.CalledProcessError:
-                            self.log_message("Failed to fix rosbag file", 'RED')
-                    else:
-                        self.log_message("No rosbag file found", 'RED')
+                    self.log_message("No rosbag file found", 'RED')
                 
                 return True
             else:
                 self.log_message(f"Experiment {exp_num} exploration timed out after {self.max_exploration_time} seconds", 'RED')
                 self.exploration_fail_count += 1
+                
+                # Try to stop rosbag and cleanup files on timeout
+                self.log_message("Stopping rosbag recording after timeout...")
+                if 'rosbag' in self.processes and self.processes['rosbag']:
+                    try:
+                        self.processes['rosbag'].send_signal(signal.SIGINT)
+                        self.processes['rosbag'].wait(timeout=10)
+                        self.log_message("Rosbag stopped successfully")
+                    except (subprocess.TimeoutExpired, ProcessLookupError):
+                        try:
+                            self.processes['rosbag'].kill()
+                        except ProcessLookupError:
+                            pass
+                
+                time.sleep(3)
+                
+                # Cleanup residual bag files
+                bag_path = f"{bag_output_base}.bag"
+                active_bag_path = f"{bag_output_base}.bag.active"
+                orig_active_bag_path = f"{bag_output_base}.bag.orig.active"
+
+                if not os.path.exists(bag_path) and os.path.exists(active_bag_path):
+                    try:
+                        subprocess.run(['rosbag', 'reindex', active_bag_path], timeout=30, check=True)
+                        subprocess.run(['rosbag', 'fix', active_bag_path, bag_path], timeout=60, check=True)
+                    except subprocess.CalledProcessError:
+                        pass
+
+                for leftover in [active_bag_path, orig_active_bag_path]:
+                    try:
+                        if os.path.exists(leftover):
+                            os.remove(leftover)
+                    except Exception:
+                        pass
                 
                 # Clean up all processes before starting next experiment
                 self.cleanup_terminals()

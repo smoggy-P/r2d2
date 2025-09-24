@@ -114,6 +114,8 @@ class ExperimentRunner:
                          timeout=10, capture_output=True)
             subprocess.run(['docker', 'exec', 'c1ad613f28a6', 'pkill', '-f', 'ov_msckf'], 
                          timeout=10, capture_output=True)
+            subprocess.run(['docker', 'exec', 'c1ad613f28a6', 'pkill', '-f', 'exploration_manager'], 
+                         timeout=10, capture_output=True)
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
         
@@ -309,6 +311,14 @@ class ExperimentRunner:
                                 'orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0} } }'
                             ], timeout=10)
             
+            if self.method == 'la_planner':
+                self.log_message("Starting LA Planner...")
+                la_planner_cmd = [
+                    'gnome-terminal', '--title', f'LA_Planner_Exp_{exp_num}',
+                    '--', 'bash', '-c',
+                    f"docker exec -it 09c1ac37930c bash -c 'cd ~/la_ws && source devel/setup.bash && roslaunch exploration_manager run_map1.launch' 2>&1 | tee '{la_planner_log}'"
+                ]
+            
             # 7. Start rosbag recording in new terminal
             bag_name = f"{self.world_name}_exp_{exp_num}_{datetime.now().strftime('%H%M%S')}"
             self.log_message(f"Starting rosbag recording: {bag_name}")
@@ -333,8 +343,8 @@ class ExperimentRunner:
                 end_message = "No coverable frontier."
                 monitored_log = fuel_log
             else:
-                end_message = "No frontiers found"
-                monitored_log = sim_log
+                end_message = "No feature viewpoint, wait for target"
+                monitored_log = la_planner_log
             self.log_message(f"Monitoring for '{end_message}' (max wait: {self.max_exploration_time} seconds)...")
             if self.wait_for_message(monitored_log, end_message, self.max_exploration_time):
                 self.log_message(f"Experiment {exp_num} completed successfully!", 'GREEN')

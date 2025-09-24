@@ -38,6 +38,8 @@ class ExperimentRunner:
         # Process tracking
         self.processes = {}
         self.window_ids = {}
+        # Track containers started by this run so we can stop them later
+        self.started_containers = set()
         
         # Create experiment directory first
         os.makedirs(self.experiment_dir, exist_ok=True)
@@ -118,6 +120,13 @@ class ExperimentRunner:
                          timeout=10, capture_output=True)
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
+        
+        # Stop containers that were started by this run
+        for cid in list(getattr(self, 'started_containers', set())):
+            try:
+                subprocess.run(['docker', 'stop', cid], timeout=15, capture_output=True)
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
         
         # Kill any remaining ROS processes
         ros_processes = [
@@ -202,15 +211,43 @@ class ExperimentRunner:
         sim_log = f"/tmp/sim_log_{exp_num}.txt"
         r2d2_log = f"/tmp/r2d2_log_{exp_num}.txt"  
         fuel_log = f"/tmp/fuel_log_{exp_num}.txt"
+        la_planner_log = f"/tmp/la_planner_log_{exp_num}.txt"
         
         # Clean up any existing log files
-        for log_file in [vo_log, sim_log, r2d2_log, fuel_log]:
+        for log_file in [vo_log, sim_log, r2d2_log, fuel_log, la_planner_log]:
             try:
                 os.remove(log_file)
             except FileNotFoundError:
                 pass
         
         try:
+            # Ensure required containers are started
+            try:
+                result_vo = subprocess.run(['docker', 'start', 'c1ad613f28a6'], capture_output=True)
+                if result_vo.returncode == 0:
+                    self.started_containers.add('c1ad613f28a6')
+            except FileNotFoundError:
+                pass
+            
+            if self.method in ['fuel', 'la_planner']:
+                try:
+                    result_aux = subprocess.run(['docker', 'start', '09c1ac37930c'], capture_output=True)
+                    if result_aux.returncode == 0:
+                        self.started_containers.add('09c1ac37930c')
+                except FileNotFoundError:
+                    pass
+            
+            if self.method == 'la_planner':
+                self.log_message("Starting LA Planner...")
+                la_planner_cmd = [
+                    'gnome-terminal', '--title', f'LA_Planner_Exp_{exp_num}',
+                    '--', 'bash', '-c',
+                    f"docker exec -it 09c1ac37930c bash -c 'cd ~/la_ws && source devel/setup.bash && roslaunch exploration_manager run_map1.launch' 2>&1 | tee '{la_planner_log}'"
+                ]
+                self.processes['la_planner'] = subprocess.Popen(la_planner_cmd)
+                time.sleep(2)
+                self.window_ids['la_planner'] = self.get_window_id(f'LA_Planner_Exp_{exp_num}')
+            
             # 1. Start Visual Odometry in new terminal
             self.log_message("Starting Visual Odometry...")
             vo_cmd = [
@@ -310,14 +347,6 @@ class ExperimentRunner:
                                 'pose: { position: {x: 1.0, y: 2.0, z: 0.0}, '
                                 'orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0} } }'
                             ], timeout=10)
-            
-            if self.method == 'la_planner':
-                self.log_message("Starting LA Planner...")
-                la_planner_cmd = [
-                    'gnome-terminal', '--title', f'LA_Planner_Exp_{exp_num}',
-                    '--', 'bash', '-c',
-                    f"docker exec -it 09c1ac37930c bash -c 'cd ~/la_ws && source devel/setup.bash && roslaunch exploration_manager run_map1.launch' 2>&1 | tee '{la_planner_log}'"
-                ]
             
             # 7. Start rosbag recording in new terminal
             bag_name = f"{self.world_name}_exp_{exp_num}_{datetime.now().strftime('%H%M%S')}"
@@ -447,7 +476,7 @@ class ExperimentRunner:
     
     def check_dependencies(self):
         """Check if required dependencies are available"""
-        dependencies = ['wmctrl', 'gnome-terminal', 'rostopic', 'rosbag']
+        dependencies = ['wmctrl', 'gnome-terminal', 'rostopic', 'rosbag', 'docker']
         missing = []
         
         for dep in dependencies:
@@ -503,8 +532,8 @@ def main():
     parser = argparse.ArgumentParser(description='Visual Odometry Simulation Experiment Script')
     parser.add_argument('world_name', help='Name of the world to use for experiments')
     parser.add_argument('total_experiments', type=int, help='Total number of experiments to run')
-    parser.add_argument('--max-exploration-time', type=int, default=300, 
-                       help='Maximum time to wait for exploration completion in seconds (default: 300)')
+    parser.add_argument('--max-exploration-time', type=int, default=50, 
+                       help='Maximum time to wait for exploration completion in seconds (default: 200)')
     parser.add_argument('--method', type=str, default='vo_safe',
                        help='Method to use for exploration (default: vo_safe)')
     args = parser.parse_args()

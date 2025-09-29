@@ -482,6 +482,13 @@ def create_heatmap(r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
     """
     
     # Create 2D histogram for R2D2 features (weighted by intensity)
+    # Normalize the intensities to [0, 1]
+    r2d2_intensities = (r2d2_intensities - np.min(r2d2_intensities)) / (np.max(r2d2_intensities) - np.min(r2d2_intensities))
+    print("===========================")
+    print(np.min(r2d2_u_coords), np.max(r2d2_u_coords))
+    print(np.min(r2d2_v_coords), np.max(r2d2_v_coords))
+    print(np.min(r2d2_intensities), np.max(r2d2_intensities))
+    print("===============================")
     if len(r2d2_u_coords) > 0:
         r2d2_heatmap, r2d2_x_edges, r2d2_y_edges = np.histogram2d(
             r2d2_u_coords, r2d2_v_coords, 
@@ -590,6 +597,127 @@ def create_heatmap(r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
     
     return fig
 
+
+def draw_heatmaps_on_axes(ax_r2d2, ax_ov,
+                          r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
+                          ov_msckf_u_coords, ov_msckf_v_coords,
+                          r2d2_width=1280, r2d2_height=640,
+                          ov_width=1920, ov_height=1080,
+                          total_time=None, bin_size=20,
+                          fixed_scale_r2d2=None, fixed_scale_ov=None):
+    """在提供的 axes 上绘制 R2D2 和 OV-MSCKF 的热力图。
+
+    该函数复用 create_heatmap 的直方图与显示逻辑，但不再创建新的 Figure。
+    """
+    import matplotlib.pyplot as plt
+
+    # 归一化 R2D2 强度到 [0,1]
+    if len(r2d2_intensities) > 0:
+        r2d2_intensities = (r2d2_intensities - np.min(r2d2_intensities)) / (
+            np.max(r2d2_intensities) - np.min(r2d2_intensities) if (np.max(r2d2_intensities) - np.min(r2d2_intensities)) != 0 else 1.0
+        )
+
+    # R2D2 2D 直方图（按强度加权）
+    if len(r2d2_u_coords) > 0:
+        r2d2_heatmap, r2d2_x_edges, r2d2_y_edges = np.histogram2d(
+            r2d2_u_coords, r2d2_v_coords,
+            bins=[r2d2_width // bin_size, r2d2_height // bin_size],
+            range=[[0, r2d2_width], [0, r2d2_height]],
+            weights=r2d2_intensities
+        )
+        if total_time is not None and total_time > 0:
+            r2d2_heatmap = r2d2_heatmap / total_time
+    else:
+        r2d2_heatmap = np.zeros((r2d2_height // bin_size, r2d2_width // bin_size))
+        r2d2_x_edges = np.linspace(0, r2d2_width, r2d2_width // bin_size + 1)
+        r2d2_y_edges = np.linspace(0, r2d2_height, r2d2_height // bin_size + 1)
+
+    # OV-MSCKF 2D 直方图（未加权）
+    if len(ov_msckf_u_coords) > 0:
+        ov_msckf_heatmap, ov_x_edges, ov_y_edges = np.histogram2d(
+            ov_msckf_u_coords, ov_msckf_v_coords,
+            bins=[ov_width // bin_size, ov_height // bin_size],
+            range=[[0, ov_width], [0, ov_height]]
+        )
+        if total_time is not None and total_time > 0:
+            ov_msckf_heatmap = ov_msckf_heatmap / total_time
+    else:
+        ov_msckf_heatmap = np.zeros((ov_height // bin_size, ov_width // bin_size))
+        ov_x_edges = np.linspace(0, ov_width, ov_width // bin_size + 1)
+        ov_y_edges = np.linspace(0, ov_height, ov_height // bin_size + 1)
+
+    # 计算颜色范围
+    r2d2_nonzero = r2d2_heatmap[r2d2_heatmap > 0]
+    ov_nonzero = ov_msckf_heatmap[ov_msckf_heatmap > 0]
+
+    if fixed_scale_r2d2 is not None:
+        r2d2_vmin, r2d2_vmax = fixed_scale_r2d2
+        r2d2_title_suffix = f" (Fixed Scale: {r2d2_vmin:.2f}-{r2d2_vmax:.2f})"
+    else:
+        r2d2_vmin, r2d2_vmax = 0.0, 1.0
+        r2d2_title_suffix = " (Linear 0-1)"
+
+    if fixed_scale_ov is not None:
+        ov_vmin, ov_vmax = fixed_scale_ov
+        ov_title_suffix = f" (Fixed Scale: {ov_vmin:.2f}-{ov_vmax:.2f})"
+    else:
+        ov_vmin, ov_vmax = 0.0, 1.0
+        ov_title_suffix = " (Linear 0-1)"
+
+    # 显示（裁剪到 [0,1]）
+    r2d2_display = np.clip(r2d2_heatmap, 0.0, 1.0)
+    im1 = ax_r2d2.imshow(
+        r2d2_display.T, origin='lower',
+        extent=[r2d2_x_edges[0], r2d2_x_edges[-1], r2d2_y_edges[0], r2d2_y_edges[-1]],
+        aspect='auto', cmap='viridis', vmin=r2d2_vmin, vmax=r2d2_vmax
+    )
+    ax_r2d2.set_title(f'R2D2 Feature Density{r2d2_title_suffix}')
+    ax_r2d2.set_xlabel('Image U Coordinate (pixels)')
+    ax_r2d2.set_ylabel('Image V Coordinate (pixels)')
+    ax_r2d2.figure.colorbar(
+        im1, ax=ax_r2d2,
+        label='Weighted Density per Second' if (total_time is not None and total_time > 0) else 'Weighted Density'
+    )
+
+    ov_display = np.clip(ov_msckf_heatmap, 0.0, 1.0)
+    im2 = ax_ov.imshow(
+        ov_display.T, origin='lower',
+        extent=[ov_x_edges[0], ov_x_edges[-1], ov_y_edges[0], ov_y_edges[-1]],
+        aspect='auto', cmap='viridis', vmin=ov_vmin, vmax=ov_vmax
+    )
+    ax_ov.set_title(f'OV-MSCKF Feature Density{ov_title_suffix}')
+    ax_ov.set_xlabel('Image U Coordinate (pixels)')
+    ax_ov.set_ylabel('Image V Coordinate (pixels)')
+    ax_ov.figure.colorbar(
+        im2, ax=ax_ov,
+        label='Feature Count per Second' if (total_time is not None and total_time > 0) else 'Feature Count'
+    )
+
+    # 打印统计信息（与原函数一致）
+    print("\n=== Feature Point Statistics ===")
+    if len(r2d2_u_coords) > 0:
+        print(f"R2D2 Features - Total: {len(r2d2_u_coords)}, "
+              f"Mean Intensity: {np.mean(r2d2_intensities):.3f}")
+        r2d2_nonzero_mean = np.mean(r2d2_nonzero) if len(r2d2_nonzero) > 0 else 0.0
+        print(f"R2D2 Density - Mean: {r2d2_nonzero_mean:.3f}, "
+              f"Max: {np.max(r2d2_heatmap):.3f}, "
+              f"95th percentile: {np.percentile(r2d2_nonzero, 95) if len(r2d2_nonzero)>0 else 0.0:.3f}, "
+              f"99th percentile: {np.percentile(r2d2_nonzero, 99) if len(r2d2_nonzero)>0 else 0.0:.3f}")
+    else:
+        print("R2D2 Features - No data available")
+
+    if len(ov_msckf_u_coords) > 0:
+        ov_nonzero_mean = np.mean(ov_nonzero) if len(ov_nonzero) > 0 else 0.0
+        print(f"OV-MSCKF Features - Total: {len(ov_msckf_u_coords)}")
+        print(f"OV-MSCKF Density - Mean: {ov_nonzero_mean:.3f}, "
+              f"Max: {np.max(ov_msckf_heatmap):.3f}, "
+              f"95th percentile: {np.percentile(ov_nonzero, 95) if len(ov_nonzero)>0 else 0.0:.3f}, "
+              f"99th percentile: {np.percentile(ov_nonzero, 99) if len(ov_nonzero)>0 else 0.0:.3f}")
+    else:
+        print("OV-MSCKF Features - No data available")
+
+    return ax_r2d2, ax_ov
+
 def interpolate_exploration_rate(exploration_times, exploration_rates, target_times):
     """Interpolate exploration rate to target timestamps"""
     if len(exploration_times) < 2:
@@ -604,7 +732,12 @@ def interpolate_exploration_rate(exploration_times, exploration_rates, target_ti
 def create_plots(exploration_times, exploration_rates, error_times, 
                 position_errors, orientation_errors, gt_trajectory_times,
                 gt_trajectory_x, gt_trajectory_y, gt_trajectory_z,
-                vins_trajectory_times, vins_trajectory_x, vins_trajectory_y, vins_trajectory_z):
+                vins_trajectory_times, vins_trajectory_x, vins_trajectory_y, vins_trajectory_z,
+                heatmap_inputs=None,
+                image_width=1280, image_height=720,
+                bin_size=20,
+                fixed_scale_r2d2=None, fixed_scale_ov=None,
+                total_time=None):
     """Create the required plots including trajectory comparison"""
     
     # Check if we have valid error data
@@ -623,7 +756,7 @@ def create_plots(exploration_times, exploration_rates, error_times,
         exploration_times, exploration_rates, error_times
     )
     
-    # Create figure with subplots (3x3 layout to add velocity plot)
+    # Create figure with subplots (3x3 layout to add velocity plot and heatmaps)
     fig, axes = plt.subplots(3, 3, figsize=(18, 16))
     fig.suptitle('ROS Bag Analysis Results', fontsize=16, fontweight='bold')
     
@@ -721,9 +854,23 @@ def create_plots(exploration_times, exploration_rates, error_times,
     axes[2, 0].grid(True, alpha=0.3)
     axes[2, 0].legend()
     
-    # Hide unused subplots (if any)
-    axes[2, 1].axis('off')
-    axes[2, 2].axis('off')
+    # Plot 8 & 9: Heatmaps embedded if inputs provided
+    if heatmap_inputs is not None:
+        (r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
+         ov_msckf_u_coords, ov_msckf_v_coords) = heatmap_inputs
+
+        draw_heatmaps_on_axes(
+            axes[2, 1], axes[2, 2],
+            r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
+            ov_msckf_u_coords, ov_msckf_v_coords,
+            r2d2_width=image_width, r2d2_height=image_height,
+            ov_width=image_width, ov_height=image_height,
+            total_time=total_time, bin_size=bin_size,
+            fixed_scale_r2d2=fixed_scale_r2d2, fixed_scale_ov=fixed_scale_ov
+        )
+    else:
+        axes[2, 1].axis('off')
+        axes[2, 2].axis('off')
     
     # 移除停止处理相关的注释
     # if error_time_rel[-1] < exp_time_rel[-1]:
@@ -755,12 +902,12 @@ def main():
     parser.add_argument('--output', '-o', help='Output plot file (optional)')
     parser.add_argument('--show', action='store_true', help='Show plots interactively')
     parser.add_argument('--image-width', type=int, default=1280, help='Image width for R2D2 heatmap (default: 1280)')
-    parser.add_argument('--image-height', type=int, default=640, help='Image height for R2D2 heatmap (default: 640)')
+    parser.add_argument('--image-height', type=int, default=720, help='Image height for R2D2 heatmap (default: 640)')
     parser.add_argument('--bin-size', type=int, default=20, help='Bin size for heatmap (default: 20)')
     parser.add_argument('--r2d2-scale', nargs=2, type=float, metavar=('MIN', 'MAX'), 
-                       default=[0.0, 0.2], help='Fixed scale range for R2D2 heatmap [min max] (default: 0.0 0.5)')
+                       default=[0.0, 0.05], help='Fixed scale range for R2D2 heatmap [min max] (default: 0.0 0.5)')
     parser.add_argument('--ov-scale', nargs=2, type=float, metavar=('MIN', 'MAX'),
-                       default=[0.0, 0.6], help='Fixed scale range for OV-MSCKF heatmap [min max] (default: 0.0 0.5)')
+                       default=[0.0, 1.0], help='Fixed scale range for OV-MSCKF heatmap [min max] (default: 0.0 0.5)')
     
     args = parser.parse_args()
     
@@ -782,40 +929,33 @@ def main():
      gt_trajectory_times, gt_trajectory_x, gt_trajectory_y, gt_trajectory_z,
      vins_trajectory_times, vins_trajectory_x, vins_trajectory_y, vins_trajectory_z) = result
     
-    # Process PointCloud data and create heatmaps
+    # Process PointCloud data once (for heatmaps)
     pointcloud_result = process_pointcloud_data(r2d2_pointcloud_data, ov_msckf_pointcloud_data,
                                               exploration_times, exploration_rates)
-    
-    if pointcloud_result[0] is not None:  # Check if we have any R2D2 data
-        r2d2_u_coords, r2d2_v_coords, r2d2_intensities, ov_msckf_u_coords, ov_msckf_v_coords = pointcloud_result
-        
-        # 计算总时间（从exploration_times获取）
-        total_time = exploration_times[-1] - exploration_times[0] if len(exploration_times) > 1 else None
-        print(f"Total bag time: {total_time:.2f} seconds")
-        
-        # Create heatmap with different image sizes for R2D2 and OV-MSCKF
-        heatmap_fig = create_heatmap(r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
-                                    ov_msckf_u_coords, ov_msckf_v_coords,
-                                    r2d2_width=args.image_width, r2d2_height=args.image_height,
-                                    ov_width=args.image_width, ov_height=args.image_height,
-                                    total_time=total_time, bin_size=args.bin_size,
-                                    fixed_scale_r2d2=args.r2d2_scale, fixed_scale_ov=args.ov_scale)
-        
-        # 直接显示热力图
-        plt.figure(heatmap_fig.number)
-        plt.show()
-    
-    # Create main plots
-    fig = create_plots(exploration_times, exploration_rates, error_times, 
+
+    heatmap_inputs = None
+    total_time = exploration_times[-1] - exploration_times[0] if len(exploration_times) > 1 else None
+    print(f"Total bag time: {total_time:.2f} seconds")
+
+    if pointcloud_result[0] is not None:
+        heatmap_inputs = pointcloud_result
+
+    # Create a single combined figure (plots + heatmaps)
+    fig = create_plots(exploration_times, exploration_rates, error_times,
                       position_errors, orientation_errors,
                       gt_trajectory_times, gt_trajectory_x, gt_trajectory_y, gt_trajectory_z,
-                      vins_trajectory_times, vins_trajectory_x, vins_trajectory_y, vins_trajectory_z)
+                      vins_trajectory_times, vins_trajectory_x, vins_trajectory_y, vins_trajectory_z,
+                      heatmap_inputs=heatmap_inputs,
+                      image_width=args.image_width, image_height=args.image_height,
+                      bin_size=args.bin_size,
+                      fixed_scale_r2d2=args.r2d2_scale, fixed_scale_ov=args.ov_scale,
+                      total_time=total_time)
     
     if fig is None:
         print("Error: Failed to create plots")
         return
     
-    # 直接显示所有图
+    # 直接显示合并后的单张图
     plt.show()
 
 if __name__ == '__main__':

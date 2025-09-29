@@ -427,6 +427,85 @@ def combined_compare_figure(map_name: str, method_to_heatmap: Dict[str, Tuple[np
     plt.savefig(out_path)
     plt.close(fig)
 
+
+def plot_error_vs_exploration_compare(map_name: str,
+                                      method_to_pairs: Dict[str, List[Tuple[np.ndarray, np.ndarray]]],
+                                      num_bins: int,
+                                      x_max: float,
+                                      out_path: str):
+    """绘制 y(归一化 exploration rate) vs x(position error) 曲线。
+    统计口径：对每个阈值 x，按每个 bag 的“首次 position error ≥ x”的时刻取归一化 exploration rate；
+    若 bag 从未越过该 x，则回退为该 bag 的成功归一化值（或末帧/最大归一化规则的一致值）。
+    这样在 x=阈值 时的均值等效于 mean_success_exploration_rate_norm。
+    注意：此函数假定传入的数据结构为每方法的样本三元组列表：(pos_err_array, norm_rate_array, fallback_scalar)。
+    """
+    # 为了兼容原调用，此处把 method_to_pairs 视为 List[(pos_err, norm_rate, fallback)]
+    methods = sorted(method_to_pairs.keys())
+    if not methods:
+        return
+    # 以 [0, x_max] 均匀分箱作为阈值集合
+    x_min = 0.0
+    if not np.isfinite(x_max) or x_max <= x_min:
+        return
+    bin_edges = np.linspace(x_min, float(x_max), int(max(5, num_bins)) + 1)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    plt.figure(figsize=(8, 5))
+    plt.title(f'{map_name} Normalized Exploration Rate vs Position Error')
+
+    for method in methods:
+        samples = method_to_pairs[method]
+        if not samples:
+            continue
+        # 对每个阈值，收集每个 bag 的首次越阈值的 y；若未越阈，用 fallback
+        mean_values = np.full_like(bin_centers, np.nan, dtype=float)
+        std_values = np.full_like(bin_centers, np.nan, dtype=float)
+        for b_idx in range(len(bin_centers)):
+            thr = bin_centers[b_idx]
+            values = []
+            for sample in samples:
+                # 兼容两种形态：(pos, rate, fallback) 或旧的 (x, y)
+                if len(sample) >= 3:
+                    pos_arr, rate_arr, fallback_val = sample[0], sample[1], sample[2]
+                else:
+                    # 旧数据结构：x=norm_rate, y=pos_err；无法等效，只能跳过
+                    continue
+                if pos_arr is None or rate_arr is None:
+                    continue
+                pos_flat = np.asarray(pos_arr).ravel()
+                rate_flat = np.asarray(rate_arr).ravel()
+                mask = np.isfinite(pos_flat) & np.isfinite(rate_flat)
+                pos_flat = pos_flat[mask]
+                rate_flat = rate_flat[mask]
+                if pos_flat.size == 0:
+                    continue
+                crossed = np.where(pos_flat >= thr)[0]
+                if crossed.size > 0:
+                    idx = int(crossed[0])
+                    values.append(float(rate_flat[idx]))
+                else:
+                    # 回退值（成功归一化率）
+                    values.append(float(fallback_val))
+            if values:
+                mean_values[b_idx] = float(np.mean(values))
+                std_values[b_idx] = float(np.std(values))
+        if np.all(~np.isfinite(mean_values)):
+            continue
+        plt.plot(bin_centers, mean_values, label=method)
+        lower = np.clip(mean_values - std_values, 0.0, 1.0)
+        upper = np.clip(mean_values + std_values, 0.0, 1.0)
+        plt.fill_between(bin_centers, lower, upper, alpha=0.2)
+
+    plt.xlabel('Position Error (m)')
+    plt.ylabel('Normalized Exploration Rate')
+    plt.xlim(0.0, float(x_max))
+    plt.ylim(0.0, 1.0)
+    plt.legend()
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path)
+    plt.close()
+
 # -----------------------------
 # 路径解析: 推断 map / method
 # -----------------------------
@@ -569,6 +648,20 @@ def process_single_bag(bag_path: str, args):
         if success_ref is None or not np.isfinite(success_ref) or success_ref <= 0:
             success_ref = 1.0
         success_exploration_rate = float(np.clip(success_exploration_rate_raw / success_ref, 0.0, 1.0)) if np.isfinite(success_exploration_rate_raw) else float('nan')
+    # 计算曲线横轴需要的“归一化 exploration rate”（独立于是否输出归一化成功率）
+    curve_ref = None
+    if len(exploration_rates) > 0:
+        if success_run:
+            curve_ref = float(exploration_rates[-1])
+        else:
+            curve_ref = float(np.nanmax(exploration_rates))
+    if curve_ref is None or not np.isfinite(curve_ref) or curve_ref <= 0:
+        curve_ref = 1.0
+    curve_x_norm = None
+    try:
+        curve_x_norm = np.clip(np.asarray(exp_rate_on_error_t, dtype=float) / float(curve_ref), 0.0, 1.0)
+    except Exception:
+        curve_x_norm = exp_rate_on_error_t
     # 点云热力图与每消息统计
     r2d2_u, r2d2_v, r2d2_intensity, ov_u, ov_v, r2d2_weight_per_msg, ov_count_per_msg = process_pointcloud_data(
         r2d2_pointcloud_data, ov_msckf_pointcloud_data
@@ -594,6 +687,8 @@ def process_single_bag(bag_path: str, args):
         'ov_edges': (ov_xe, ov_ye),
         'ov_mean_per_ts': ov_mean_per_ts,
         'r2d2_weight_mean_per_ts': r2d2_weight_mean_per_ts,
+        'curve_x': curve_x_norm,
+        'curve_y': position_errors,
     }
 
 # -----------------------------
@@ -642,6 +737,9 @@ def main():
     parser.add_argument('--output-dir', '-o', type=str, default='results_batch', help='Output directory')
     parser.add_argument('--show', action='store_true', help='Show figures')
     parser.add_argument('--no-recursive', action='store_true', help='Do not recurse into subdirectories')
+    # 新增：曲线绘图参数
+    parser.add_argument('--curve-ymax', type=float, default=200.0, help='Y-axis max for position error vs exploration rate plot')
+    parser.add_argument('--curve-bins', type=int, default=20, help='Number of bins along exploration rate for curve averaging')
     args = parser.parse_args()
 
     # 仅处理指定 map 名过滤
@@ -681,6 +779,8 @@ def main():
     stats = {}
     heatmaps_r2d2 = defaultdict(dict)  # map -> method -> (heat, x_edges, y_edges)
     heatmaps_ov = defaultdict(dict)
+    # 新增：曲线数据容器 map -> method -> List[(pos_err_array, norm_rate_array, fallback_scalar)]
+    curve_points = defaultdict(lambda: defaultdict(list))
 
     rows_success_rate = []  # map, method, n, mean, std
     rows_success_time = []  # map, method, n_success, mean_time, std_time
@@ -698,6 +798,7 @@ def main():
         total_time_sum = 0.0
         r2d2_edges = None
         ov_edges = None
+        method_curve_pairs = []
         for bag in bags:
             print(f"-- Processing: {bag}")
             res = process_single_bag(bag, args)
@@ -726,6 +827,13 @@ def main():
             else:
                 sum_ov += np.array(res['ov_heat'], dtype=np.float64)
             total_time_sum += max(res['total_time'], 1e-6)
+            # 曲线数据收集：存为(position_error, normalized_rate, fallback)
+            if 'curve_x' in res and 'curve_y' in res:
+                norm_rate_arr = np.asarray(res['curve_x'])  # normalized exploration rate over error timestamps
+                pos_err_arr = np.asarray(res['curve_y'])     # position error over error timestamps
+                fallback_val = float(res.get('success_exploration_rate', np.nan))
+                if norm_rate_arr.size > 0 and pos_err_arr.size > 0:
+                    method_curve_pairs.append((pos_err_arr, norm_rate_arr, fallback_val))
         # 形成平均每秒密度
         if sum_r2d2 is None:
             avg_r2d2 = np.zeros((args.image_height // args.bin_size, args.image_width // args.bin_size))
@@ -747,6 +855,9 @@ def main():
             avg_ov = sum_ov / n_valid
         heatmaps_r2d2[map_name][method] = (avg_r2d2, r2d2_edges[0], r2d2_edges[1])
         heatmaps_ov[map_name][method] = (avg_ov, ov_edges[0], ov_edges[1])
+        # 保存该组的曲线点
+        if method_curve_pairs:
+            curve_points[map_name][method] = method_curve_pairs
         # 记录统计
         if success_rates:
             rows_success_rate.append([
@@ -784,6 +895,12 @@ def main():
         combined_ov_out = os.path.join(outdir, f"{map_name}__compare__ov.png")
         combined_compare_figure(map_name + ' - R2D2', method_map, tuple(args.r2d2_scale), combined_r2d2_out)
         combined_compare_figure(map_name + ' - OV', heatmaps_ov[map_name], tuple(args.ov_scale), combined_ov_out)
+
+    # 新增：绘制 Position Error vs Exploration Rate 对比曲线
+    for map_name, method_pairs in curve_points.items():
+        out_path_curve = os.path.join(outdir, f"{map_name}__compare__poserr_vs_exploration.png")
+        # 使用曲线y轴上限参数作为position error的x轴上限（保持可控），也可另增参数
+        plot_error_vs_exploration_compare(map_name, method_pairs, args.curve_bins, args.curve_ymax, out_path_curve)
 
     # 保存 CSV/JSON
     import csv
@@ -825,6 +942,9 @@ def main():
             r2d2_cmp = os.path.join(outdir, f"{map_name}__compare__r2d2.png")
             ov_cmp = os.path.join(outdir, f"{map_name}__compare__ov.png")
             print(f"Saved compare figures: {r2d2_cmp}, {ov_cmp}")
+            # 新增：曲线对比图路径提示
+            curve_cmp = os.path.join(outdir, f"{map_name}__compare__poserr_vs_exploration.png")
+            print(f"Saved curve figure: {curve_cmp}")
             break
 
     print(f"\nAll done. Results saved to: {outdir}")

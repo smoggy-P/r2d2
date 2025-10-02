@@ -484,11 +484,6 @@ def create_heatmap(r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
     # Create 2D histogram for R2D2 features (weighted by intensity)
     # Normalize the intensities to [0, 1]
     r2d2_intensities = (r2d2_intensities - np.min(r2d2_intensities)) / (np.max(r2d2_intensities) - np.min(r2d2_intensities))
-    print("===========================")
-    print(np.min(r2d2_u_coords), np.max(r2d2_u_coords))
-    print(np.min(r2d2_v_coords), np.max(r2d2_v_coords))
-    print(np.min(r2d2_intensities), np.max(r2d2_intensities))
-    print("===============================")
     if len(r2d2_u_coords) > 0:
         r2d2_heatmap, r2d2_x_edges, r2d2_y_edges = np.histogram2d(
             r2d2_u_coords, r2d2_v_coords, 

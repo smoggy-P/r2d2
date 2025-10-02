@@ -621,30 +621,11 @@ def process_single_bag(bag_path: str, args):
     # Success run condition
     success_run = (failure_idx is None) and (total_time < args.success_time_limit)
     # Normalize success rate to 100%
+    # Defer normalization to global post-processing; keep raw value
     success_exploration_rate_raw = success_exploration_rate
-    success_ref = None
-    if args.normalize_success_rate:
-        if success_run:
-            success_ref = float(exploration_rates[-1]) if len(exploration_rates) > 0 else None
-        else:
-            success_ref = float(np.nanmax(exploration_rates)) if len(exploration_rates) > 0 else None
-        if success_ref is None or not np.isfinite(success_ref) or success_ref <= 0:
-            success_ref = 1.0
-        success_exploration_rate = float(np.clip(success_exploration_rate_raw / success_ref, 0.0, 1.0)) if np.isfinite(success_exploration_rate_raw) else float('nan')
     # Compute normalized exploration rate for curve x-axis
-    curve_ref = None
-    if len(exploration_rates) > 0:
-        if success_run:
-            curve_ref = float(exploration_rates[-1])
-        else:
-            curve_ref = float(np.nanmax(exploration_rates))
-    if curve_ref is None or not np.isfinite(curve_ref) or curve_ref <= 0:
-        curve_ref = 1.0
-    curve_x_norm = None
-    try:
-        curve_x_norm = np.clip(np.asarray(exp_rate_on_error_t, dtype=float) / float(curve_ref), 0.0, 1.0)
-    except Exception:
-        curve_x_norm = exp_rate_on_error_t
+    # Defer x-axis normalization to global stage; return raw interpolation
+    curve_x_norm = exp_rate_on_error_t
     # Point cloud heatmaps and per-message stats
     r2d2_u, r2d2_v, r2d2_intensity, ov_u, ov_v, r2d2_weight_per_msg, ov_count_per_msg = process_pointcloud_data(
         r2d2_pointcloud_data, ov_msckf_pointcloud_data
@@ -710,9 +691,9 @@ def main():
     parser.add_argument('--success-time-limit', type=float, default=200.0, help='Max time (s) to consider a run successful if no failure')
     parser.add_argument('--image-width', type=int, default=1280, help='Image width for heatmaps')
     parser.add_argument('--image-height', type=int, default=640, help='Image height for heatmaps')
-    parser.add_argument('--bin-size', type=int, default=20, help='Bin size for heatmaps (px)')
-    parser.add_argument('--r2d2-scale', nargs=2, type=float, metavar=('MIN', 'MAX'), default=[0.0, 0.02], help='Fixed scale for R2D2 heatmaps')
-    parser.add_argument('--ov-scale', nargs=2, type=float, metavar=('MIN', 'MAX'), default=[0.0, 0.15], help='Fixed scale for OV-MSCKF heatmaps')
+    parser.add_argument('--bin-size', type=int, default=40, help='Bin size for heatmaps (px)')
+    parser.add_argument('--r2d2-scale', nargs=2, type=float, metavar=('MIN', 'MAX'), default=[0.0, 0.1], help='Fixed scale for R2D2 heatmaps')
+    parser.add_argument('--ov-scale', nargs=2, type=float, metavar=('MIN', 'MAX'), default=[0.0, 0.6], help='Fixed scale for OV-MSCKF heatmaps')
     parser.add_argument('--assume-structure', choices=['map/method', 'method/map', 'auto'], default='auto', help='How to infer map/method from path')
     parser.add_argument('--map-regex', type=str, default=None, help='Regex with group(1) to extract map from relative path')
     parser.add_argument('--method-regex', type=str, default=None, help='Regex with group(1) to extract method from relative path')
@@ -727,9 +708,9 @@ def main():
     parser.add_argument('--output-dir', '-o', type=str, default='results_batch', help='Output directory')
     parser.add_argument('--show', action='store_true', help='Show figures')
     parser.add_argument('--no-recursive', action='store_true', help='Do not recurse into subdirectories')
-    parser.add_argument('--curve-ymax', type=float, default=2.0, help='Y-axis max for position error vs exploration rate plot')
-    parser.add_argument('--curve-bins', type=int, default=20, help='Number of bins along exploration rate for curve averaging')
-    parser.add_argument('--completion-percent', type=float, default=0.99, help='Completion ratio (0-1) to define exploration time cutoff (e.g., 0.95)')
+    parser.add_argument('--curve-ymax', type=float, default=10.0, help='Y-axis max for position error vs exploration rate plot')
+    parser.add_argument('--curve-bins', type=int, default=10, help='Number of bins along exploration rate for curve averaging')
+    parser.add_argument('--completion-percent', type=float, default=0.8, help='Completion ratio (0-1) to define exploration time cutoff (e.g., 0.95)')
     args = parser.parse_args()
 
     # Filter by map name
@@ -776,37 +757,68 @@ def main():
     rows_success_time = []  # map, method, n_success, mean_time, std_time
     rows_feat_per_ts = []   # map, method, n, ov_mean, ov_std, r2d2_weight_mean, r2d2_weight_std
 
+    # Pass 1: 处理所有 bag，缓存原始结果
+    group_results = defaultdict(list)
+    print("\n-- Pass 1: 解析所有 bag 并缓存原始结果 --")
     for (map_name, method), bags in sorted(groups.items()):
         print(f"\n=== Group: map={map_name}, method={method}, count={len(bags)} ===")
-        success_rates = []
-        success_times = []
-        ov_means = []
-        r2d2_weight_means = []
-        # Aggregate heatmaps: message-count-weighted per-message density mean
-        sum_r2d2 = None
-        sum_ov = None
-        total_r2d2_msgs = 0
-        total_ov_msgs = 0
-        r2d2_edges = None
-        ov_edges = None
-        # Collect curve samples
-        method_curve_pairs = []
-        # Group-level normalization reference (last exploration rate of a successful bag)
-        group_ref = None
-        pending_results = []
-        fallback_max_last_rate = 0.0
         for bag in bags:
             print(f"-- Processing: {bag}")
             res = process_single_bag(bag, args)
             if res is None:
                 print("Skip due to processing failure")
                 continue
-            # Record per-message feature stats
+            group_results[(map_name, method)].append(res)
+
+    # Pass 1.5: 预计算 (map, method) -> success_ref 字典
+    success_ref_map: Dict[Tuple[str, str], float] = {}
+    for (map_name, method), results in group_results.items():
+        success_candidates = []
+        fallback_max_last_rate = 0.0
+        for res in results:
+            last_rate = res.get('last_exploration_rate', float('nan'))
+            if np.isfinite(last_rate) and last_rate > fallback_max_last_rate:
+                fallback_max_last_rate = float(last_rate)
+            if res.get('success_run', False) and np.isfinite(last_rate) and last_rate > 0:
+                success_candidates.append(float(last_rate))
+        if success_candidates:
+            success_ref = float(max(success_candidates))
+        else:
+            success_ref = float(fallback_max_last_rate) if np.isfinite(fallback_max_last_rate) and fallback_max_last_rate > 0 else 1.0
+        success_ref_map[(map_name, method)] = success_ref
+    
+    # Manually set success_ref for la_planner for every map
+    for (map_name, method), results in group_results.items():
+        if method == 'la_planner':
+            success_ref_map[(map_name, method)] = success_ref_map[(map_name, 'fuel')]
+        print(f"Success ref for map={map_name}, method={method}: {success_ref_map[(map_name, method)]:.3f}")
+
+    # Pass 2: 使用 success_ref_map 统一归一化并统计
+    print("\n-- Pass 2: 全局归一化与统计 --")
+    for (map_name, method), results in sorted(group_results.items()):
+        success_ref = success_ref_map[(map_name, method)]
+        success_rates = []
+        success_times = []
+        ov_means = []
+        r2d2_weight_means = []
+        # Heatmap 聚合（按消息数加权）
+        sum_r2d2 = None
+        sum_ov = None
+        total_r2d2_msgs = 0
+        total_ov_msgs = 0
+        r2d2_edges = None
+        ov_edges = None
+        # 曲线样本
+        method_curve_pairs = []
+
+        for res in results:
+            # 记录每消息特征统计
             if 'ov_mean_per_msg' in res and not np.isnan(res['ov_mean_per_msg']):
                 ov_means.append(res['ov_mean_per_msg'])
             if 'r2d2_weight_mean_per_msg' in res and not np.isnan(res['r2d2_weight_mean_per_msg']):
                 r2d2_weight_means.append(res['r2d2_weight_mean_per_msg'])
-            # Accumulate heatmaps (weighted by message count)
+
+            # Heatmap 累积（按消息数加权）
             if sum_r2d2 is None:
                 sum_r2d2 = np.array(res['r2d2_heat'], dtype=np.float64) * max(1, res.get('r2d2_msg_count', 0))
                 r2d2_edges = res['r2d2_edges']
@@ -819,71 +831,39 @@ def main():
                 sum_ov += np.array(res['ov_heat'], dtype=np.float64) * max(1, res.get('ov_msg_count', 0))
             total_r2d2_msgs += int(res.get('r2d2_msg_count', 0))
             total_ov_msgs += int(res.get('ov_msg_count', 0))
-            # Update group reference and queue results
-            last_rate = res.get('last_exploration_rate', float('nan'))
-            if np.isfinite(last_rate) and last_rate > fallback_max_last_rate:
-                fallback_max_last_rate = float(last_rate)
-            if group_ref is None and res.get('success_run', False) and np.isfinite(last_rate) and last_rate > 0:
-                group_ref = float(last_rate)
-            # If reference is unknown, store; once determined, process pending
-            pending_results.append(res)
-            if group_ref is not None and len(pending_results) > 0:
-                for pres in pending_results:
-                    # Success exploration rate (failure takes first exceed time or last frame) normalized by group reference
-                    raw_success_rate = float(pres.get('success_exploration_rate_raw', np.nan))
-                    if np.isfinite(raw_success_rate):
-                        success_rates.append(float(np.clip(raw_success_rate / group_ref, 0.0, 1.0)))
-                    # Compute completion time (time to reach group_ref * completion_percent)
-                    t_arr = np.asarray(pres.get('raw_exploration_times', []), dtype=float)
-                    r_arr = np.asarray(pres.get('raw_exploration_rates', []), dtype=float)
-                    if t_arr.size > 0 and r_arr.size > 0 and np.isfinite(group_ref) and group_ref > 0:
-                        cutoff = float(group_ref * float(args.completion_percent))
-                        idxs = np.where(r_arr >= cutoff)[0]
-                        if idxs.size > 0:
-                            t_comp = float(t_arr[int(idxs[0])] - t_arr[0])
-                            if np.isfinite(t_comp) and t_comp >= 0:
-                                success_times.append(t_comp)
-                    # Curve samples (pos_err vs normalized rate by group)
-                    if 'raw_exp_rate_on_error_t' in pres and 'curve_y' in pres:
-                        norm_rate_arr = None
-                        try:
-                            norm_rate_arr = np.clip(np.asarray(pres['raw_exp_rate_on_error_t'], dtype=float) / group_ref, 0.0, 1.0)
-                        except Exception:
-                            norm_rate_arr = np.asarray(pres['curve_x'])  # Fallback to existing
-                        pos_err_arr = np.asarray(pres['curve_y'])
-                        fallback_val = float(np.clip(raw_success_rate / group_ref, 0.0, 1.0)) if np.isfinite(raw_success_rate) else float('nan')
-                        if norm_rate_arr is not None and norm_rate_arr.size > 0 and pos_err_arr.size > 0:
-                            method_curve_pairs.append((pos_err_arr, norm_rate_arr, fallback_val))
-                pending_results = []
-        # Fallback reference if none found
-        if group_ref is None:
-            group_ref = float(fallback_max_last_rate) if np.isfinite(fallback_max_last_rate) and fallback_max_last_rate > 0 else 1.0
-        if len(pending_results) > 0:
-            for pres in pending_results:
-                raw_success_rate = float(pres.get('success_exploration_rate_raw', np.nan))
-                if np.isfinite(raw_success_rate):
-                    success_rates.append(float(np.clip(raw_success_rate / group_ref, 0.0, 1.0)))
-                t_arr = np.asarray(pres.get('raw_exploration_times', []), dtype=float)
-                r_arr = np.asarray(pres.get('raw_exploration_rates', []), dtype=float)
-                if t_arr.size > 0 and r_arr.size > 0 and np.isfinite(group_ref) and group_ref > 0:
-                    cutoff = float(group_ref * float(args.completion_percent))
-                    idxs = np.where(r_arr >= cutoff)[0]
-                    if idxs.size > 0:
-                        t_comp = float(t_arr[int(idxs[0])] - t_arr[0])
-                        if np.isfinite(t_comp) and t_comp >= 0:
-                            success_times.append(t_comp)
-                if 'raw_exp_rate_on_error_t' in pres and 'curve_y' in pres:
+
+            # 统一归一化的成功探索率
+            raw_success_rate = float(res.get('success_exploration_rate_raw', np.nan))
+            if np.isfinite(raw_success_rate):
+                rate_val = raw_success_rate
+                if args.normalize_success_rate:
+                    rate_val = float(np.clip(rate_val / success_ref, 0.0, 1.0))
+                success_rates.append(rate_val)
+
+            # 完成时间（到达 success_ref * completion_percent 的时间）
+            t_arr = np.asarray(res.get('raw_exploration_times', []), dtype=float)
+            r_arr = np.asarray(res.get('raw_exploration_rates', []), dtype=float)
+            if t_arr.size > 0 and r_arr.size > 0 and np.isfinite(success_ref) and success_ref > 0:
+                cutoff = float(success_ref * float(args.completion_percent))
+                idxs = np.where(r_arr >= cutoff)[0]
+                if idxs.size > 0:
+                    t_comp = float(t_arr[int(idxs[0])] - t_arr[0])
+                    if np.isfinite(t_comp) and t_comp >= 0:
+                        success_times.append(t_comp)
+
+            # 曲线样本（pos_err vs 归一化 rate）
+            if method != 'la_planner':
+                if 'raw_exp_rate_on_error_t' in res and 'curve_y' in res:
                     try:
-                        norm_rate_arr = np.clip(np.asarray(pres['raw_exp_rate_on_error_t'], dtype=float) / group_ref, 0.0, 1.0)
+                        norm_rate_arr = np.clip(np.asarray(res['raw_exp_rate_on_error_t'], dtype=float) / success_ref, 0.0, 1.0)
                     except Exception:
-                        norm_rate_arr = np.asarray(pres['curve_x'])
-                    pos_err_arr = np.asarray(pres['curve_y'])
-                    fallback_val = float(np.clip(raw_success_rate / group_ref, 0.0, 1.0)) if np.isfinite(raw_success_rate) else float('nan')
+                        norm_rate_arr = np.asarray(res['curve_x'])
+                    pos_err_arr = np.asarray(res['curve_y'])
+                    fallback_val = float(np.clip(raw_success_rate / success_ref, 0.0, 1.0)) if np.isfinite(raw_success_rate) else float('nan')
                     if norm_rate_arr is not None and norm_rate_arr.size > 0 and pos_err_arr.size > 0:
                         method_curve_pairs.append((pos_err_arr, norm_rate_arr, fallback_val))
-            pending_results = []
 
-        # Average per-message density
+        # 每消息密度平均
         if sum_r2d2 is None or total_r2d2_msgs == 0:
             avg_r2d2 = np.zeros((args.image_height // args.bin_size, args.image_width // args.bin_size))
             r2d2_edges = (
@@ -900,12 +880,13 @@ def main():
             )
         else:
             avg_ov = sum_ov / float(total_ov_msgs)
+
         heatmaps_r2d2[map_name][method] = (avg_r2d2, r2d2_edges[0], r2d2_edges[1])
         heatmaps_ov[map_name][method] = (avg_ov, ov_edges[0], ov_edges[1])
-        # Save curve points for this group
+        # 存曲线点
         if method_curve_pairs:
             curve_points[map_name][method] = method_curve_pairs
-        # Record stats rows
+        # 记录统计
         if success_rates:
             rows_success_rate.append([
                 map_name, method, len(success_rates), float(np.mean(success_rates)), float(np.std(success_rates))

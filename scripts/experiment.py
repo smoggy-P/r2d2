@@ -179,7 +179,7 @@ class ExperimentRunner:
                 if matches:
                     distance = float(matches[-1])
                     
-                    if distance > 1.0:
+                    if distance > 2.0:
                         self.log_message(f"Distance drift detected: {distance} meters", 'RED')
                         return False
                     
@@ -326,7 +326,8 @@ class ExperimentRunner:
                 source ~/.bashrc &&
                 eval "$(conda shell.bash hook)" &&
                 conda activate r2d2-gpu && 
-                python extract_ros_global.py 2>&1 | tee '{r2d2_log}'"""
+                source /home/smoggy/workspace_ros1/vo_safe_ws/devel/setup.bash &&
+                python extract_ros_global.py"""
             ]
             self.processes['r2d2'] = subprocess.Popen(r2d2_cmd)
             time.sleep(2)
@@ -360,7 +361,7 @@ class ExperimentRunner:
                     'gnome-terminal', '--title', f'Rosbag_Exp_{exp_num}',
                     '--', 'bash', '-c',
                     f"""cd ~/workspace_ros1/r2d2 && 
-                    rosbag record -O '{bag_output_base}' /ov_msckf/loop_pose /kingfisher/ground_truth/odometry /exploration_rate /ov_msckf/loop_feats /r2d2/point_cloud /sdf_map/occupancy_all /sdf_map/occupancy_local /r2d2/global_feature_map"""
+                    rosbag record -O '{bag_output_base}' /ov_msckf/loop_pose /kingfisher/ground_truth/odometry /exploration_rate /ov_msckf/loop_feats /sdf_map/occupancy_all /sdf_map/occupancy_local /r2d2/visible_features_uv"""
                 ]
                 self.processes['rosbag'] = subprocess.Popen(rosbag_cmd)
                 time.sleep(2)
@@ -540,7 +541,7 @@ def main():
     parser = argparse.ArgumentParser(description='Visual Odometry Simulation Experiment Script')
     parser.add_argument('world_name', help='Name of the world to use for experiments')
     parser.add_argument('total_experiments', type=int, help='Total number of experiments to run')
-    parser.add_argument('--max-exploration-time', type=int, default=200, 
+    parser.add_argument('--max-exploration-time', type=int, default=300, 
                        help='Maximum time to wait for exploration completion in seconds (default: 200)')
     parser.add_argument('--method', type=str, default='vo_safe',
                        help='Method to use for exploration (default: vo_safe)')

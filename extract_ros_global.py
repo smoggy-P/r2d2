@@ -40,7 +40,7 @@ class R2D2GlobalFeatureNode:
         self.model_path = rospy.get_param('~model_path', 'models/r2d2_WASF_N16.pt')
         self.num_keypoints = rospy.get_param('~num_keypoints', 1000)
         self.reliability_thr = rospy.get_param('~reliability_thr', 0.9)
-        self.repeatability_thr = rospy.get_param('~repeatability_thr', 0.7)
+        self.repeatability_thr = rospy.get_param('~repeatability_thr', 0.9)
         self.map_range_x = rospy.get_param("~map_range_x", 100.0)
         self.map_range_y = rospy.get_param("~map_range_y", 100.0)
         self.map_range_z = rospy.get_param("~map_range_z", 50.0)
@@ -62,6 +62,7 @@ class R2D2GlobalFeatureNode:
         self.img_width  = rospy.get_param('~img_width', 1280)
         self.img_height = rospy.get_param('~img_height', 720)
         self.camera_frame = rospy.get_param('~camera_frame', 'D435i_camera_depth_frame')
+        self.max_view_distance = rospy.get_param('~max_view_distance', 10.0)  # 最大可视距离（米）
 
         # 设置发布者和订阅者
         self.bridge = CvBridge()
@@ -194,11 +195,17 @@ class R2D2GlobalFeatureNode:
         if (u < 0) or (u >= self.img_width) or (v < 0) or (v >= self.img_height):
             return False, 0.0, 0.0
 
+        # 计算距离并检查最大可视距离
+        cam_o = T_wc[0:3, 3]              # 相机在世界中的位置
+        dir_w = pw - cam_o
+        dist = np.linalg.norm(dir_w)
+        
+        # 最大距离检查
+        if dist > self.max_view_distance:
+            return False, 0.0, 0.0
+        
         # 遮挡检测（可选：仅当 KDTree 可用）
         if self.occ_kdtree is not None and self.octomap_resolution > 0.0:
-            cam_o = T_wc[0:3, 3]              # 相机在世界中的位置
-            dir_w = pw - cam_o
-            dist = np.linalg.norm(dir_w)
             if dist < 1e-6:
                 return True, u, v
             dir_w = dir_w / dist
@@ -261,7 +268,7 @@ class R2D2GlobalFeatureNode:
                     # Project the keypoint to the depth image and publish point cloud
                     if x < self.depth_img.shape[1] and y < self.depth_img.shape[0]:
                         depth = self.depth_img[int(y), int(x)]
-                        if depth > 0 and score > 0.9:
+                        if 0 <= depth <= 5000 and score > 0.95:
                             depth_meters = depth / 1000.0
 
                             x_world = depth_meters
@@ -325,7 +332,7 @@ class R2D2GlobalFeatureNode:
             points = np.array(self.global_points)
         
         # Filter ground points
-        points = points[points[:, 2] > 0.1]
+        points = points[points[:, 2] > 0.2]
         
         # Expand feature points in 6 directions with 0.1 resolution
         expanded_points = []

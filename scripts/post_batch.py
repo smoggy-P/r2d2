@@ -59,6 +59,25 @@ def calculate_orientation_error(gt_quat, est_quat) -> float:
     angle = r_rel.magnitude()
     return float(angle)
 
+# Added helpers for clarity and reuse
+
+def compute_rigid_alignment_from_first_odoms(gt_first_msg, vins_first_msg) -> Tuple[R, np.ndarray]:
+    """Compute rotation (R_gt * R_vins^{-1}) and translation aligning VINS to GT at first common timestamp."""
+    gt_initial_pos = gt_first_msg.pose.pose.position
+    vins_initial_pos = vins_first_msg.pose.pose.position
+    gt_initial_quat = gt_first_msg.pose.pose.orientation
+    vins_initial_quat = vins_first_msg.pose.pose.orientation
+
+    r_gt_initial = R.from_quat([gt_initial_quat.x, gt_initial_quat.y, gt_initial_quat.z, gt_initial_quat.w])
+    r_vins_initial = R.from_quat([vins_initial_quat.x, vins_initial_quat.y, vins_initial_quat.z, vins_initial_quat.w])
+    r_transform = r_gt_initial * r_vins_initial.inv()
+
+    gt_pos_array = np.array([gt_initial_pos.x, gt_initial_pos.y, gt_initial_pos.z], dtype=float)
+    vins_pos_array = np.array([vins_initial_pos.x, vins_initial_pos.y, vins_initial_pos.z], dtype=float)
+    vins_pos_rotated = r_transform.apply(vins_pos_array)
+    translation = gt_pos_array - vins_pos_rotated
+    return r_transform, translation
+
 
 def process_rosbag(bag_path: str):
     print(f"Processing ROS bag: {bag_path}")
@@ -81,7 +100,7 @@ def process_rosbag(bag_path: str):
                     gt_odom_data.append([timestamp, msg])
                 elif topic == '/ov_msckf/loop_pose':
                     vins_odom_data.append([timestamp, msg])
-                elif topic == '/r2d2/point_cloud':
+                elif topic == '/r2d2/visible_features_uv':
                     r2d2_pointcloud_data.append([timestamp, msg])
                 elif topic == '/ov_msckf/loop_feats':
                     ov_msckf_pointcloud_data.append([timestamp, msg])
@@ -107,6 +126,60 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
     start_time = max(exploration_times.min(), gt_times.min(), vins_times.min())
     end_time = min(exploration_times.max(), gt_times.max(), vins_times.max())
     print(f"Common time range: {start_time:.2f} to {end_time:.2f} seconds")
+    
+    # Calculate speed thresholds for GT trajectory
+    def compute_speed_thresholds(times, x, y, z, speed_threshold=0.1):
+        """Find start and end times based on speed thresholds"""
+        if len(times) < 2:
+            return start_time, end_time
+            
+        t = times.astype(np.float64)
+        dx = np.diff(x)
+        dy = np.diff(y)
+        dz = np.diff(z)
+        dt = np.diff(t)
+        dt[dt == 0] = np.nan
+        speed = np.sqrt(dx*dx + dy*dy + dz*dz) / dt
+        t_mid = (t[1:] + t[:-1]) / 2.0
+        
+        # Find first time when speed exceeds threshold
+        speed_start_idx = np.where(speed >= speed_threshold)[0]
+        if len(speed_start_idx) > 0:
+            speed_start_time = t_mid[speed_start_idx[0]]
+        else:
+            speed_start_time = start_time
+            
+        # Find last time when speed exceeds threshold (going backwards)
+        speed_end_idx = np.where(speed >= speed_threshold)[0]
+        if len(speed_end_idx) > 0:
+            speed_end_time = t_mid[speed_end_idx[-1]]
+        else:
+            speed_end_time = end_time
+            
+        return speed_start_time, speed_end_time
+    
+    # Extract GT trajectory positions for speed calculation
+    gt_positions = []
+    gt_pos_times = []
+    for timestamp, msg in gt_odom_data:
+        if start_time <= timestamp <= end_time:
+            gt_positions.append([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+            gt_pos_times.append(timestamp)
+    
+    if len(gt_positions) >= 2:
+        gt_positions = np.array(gt_positions)
+        gt_pos_times = np.array(gt_pos_times)
+        speed_start_time, speed_end_time = compute_speed_thresholds(
+            gt_pos_times, gt_positions[:, 0], gt_positions[:, 1], gt_positions[:, 2]
+        )
+        print(f"Speed-based time range: {speed_start_time:.2f} to {speed_end_time:.2f} seconds")
+        # Update time range based on speed thresholds
+        start_time = max(start_time, speed_start_time)
+        end_time = min(end_time, speed_end_time)
+        print(f"Adjusted time range: {start_time:.2f} to {end_time:.2f} seconds")
+    else:
+        print("Warning: Insufficient GT trajectory data for speed threshold calculation")
+    
     exp_mask = (exploration_times >= start_time) & (exploration_times <= end_time)
     gt_mask = (gt_times >= start_time) & (gt_times <= end_time)
     vins_mask = (vins_times >= start_time) & (vins_times <= end_time)
@@ -123,17 +196,8 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
     vins_first_idx = int(np.argmin(np.abs(vins_times - first_common_time)))
     gt_first_msg = gt_odom_data[gt_first_idx][1]
     vins_first_msg = vins_odom_data[vins_first_idx][1]
-    gt_initial_pos = gt_first_msg.pose.pose.position
-    vins_initial_pos = vins_first_msg.pose.pose.position
-    gt_initial_quat = gt_first_msg.pose.pose.orientation
-    vins_initial_quat = vins_first_msg.pose.pose.orientation
-    r_gt_initial = R.from_quat([gt_initial_quat.x, gt_initial_quat.y, gt_initial_quat.z, gt_initial_quat.w])
-    r_vins_initial = R.from_quat([vins_initial_quat.x, vins_initial_quat.y, vins_initial_quat.z, vins_initial_quat.w])
-    r_transform = r_gt_initial * r_vins_initial.inv()
-    gt_pos_array = np.array([gt_initial_pos.x, gt_initial_pos.y, gt_initial_pos.z])
-    vins_pos_array = np.array([vins_initial_pos.x, vins_initial_pos.y, vins_initial_pos.z])
-    vins_pos_rotated = r_transform.apply(vins_pos_array)
-    translation = gt_pos_array - vins_pos_rotated
+    # Use helper for rigid alignment
+    r_transform, translation = compute_rigid_alignment_from_first_odoms(gt_first_msg, vins_first_msg)
     print(f"Initial position offset: ({translation[0]:.3f}, {translation[1]:.3f}, {translation[2]:.3f}) m")
     print(f"Initial orientation offset: {np.degrees(r_transform.magnitude()):.2f}°")
     error_times = []
@@ -330,7 +394,24 @@ def interpolate_exploration_rate(exploration_times, exploration_rates, target_ti
     )
     return interp_func(target_times)
 
-# Aggregation and plotting helpers
+def default_edges(image_width: int, image_height: int, bin_size: int) -> Tuple[np.ndarray, np.ndarray]:
+    return (
+        np.linspace(0, image_width, image_width // bin_size + 1),
+        np.linspace(0, image_height, image_height // bin_size + 1),
+    )
+
+
+def accumulate_heatmap(sum_array: Optional[np.ndarray], heatmap: np.ndarray, message_count: int) -> np.ndarray:
+    if sum_array is None:
+        return np.array(heatmap, dtype=np.float64) * max(1, int(message_count))
+    return sum_array + np.array(heatmap, dtype=np.float64) * max(1, int(message_count))
+
+
+def average_heatmap(sum_array: Optional[np.ndarray], total_messages: int, image_width: int, image_height: int, bin_size: int) -> np.ndarray:
+    if sum_array is None or int(total_messages) == 0:
+        return np.zeros((image_height // bin_size, image_width // bin_size))
+    return sum_array / float(total_messages)
+
 
 def compute_histogram(u_list, v_list, weights_list, width: int, height: int, bin_size: int, total_count: Optional[int]):
     if len(u_list) == 0:
@@ -374,6 +455,7 @@ def save_heatmap_image(heatmap: np.ndarray, x_edges, y_edges, title: str, out_pa
 def combined_compare_figure(map_name: str, method_to_heatmap: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]],
                             fixed_scale: Optional[Tuple[float, float]], out_path: str):
     methods = sorted(method_to_heatmap.keys())
+    fixed_scale = None
     if not methods:
         return
     # Unified scale across methods
@@ -585,7 +667,38 @@ def infer_map_method(root: str, bag_path: str, assume_structure: str, method_key
 
     return map_name, method
 
-# Single-bag calculation and aggregation
+
+def build_success_ref_map(group_results: Dict[Tuple[str, str], List[dict]],
+                          normalize_by_method: Optional[Dict[str, str]] = None) -> Dict[Tuple[str, str], float]:
+    """Compute success reference per (map, method); optionally override target methods by reference method values per map."""
+    success_ref_map: Dict[Tuple[str, str], float] = {}
+    # Base computation
+    for key, results in group_results.items():
+        success_candidates: List[float] = []
+        fallback_max_last_rate = 0.0
+        for res in results:
+            last_rate = float(res.get('last_exploration_rate', float('nan')))
+            if np.isfinite(last_rate) and last_rate > fallback_max_last_rate:
+                fallback_max_last_rate = last_rate
+            if res.get('success_run', False) and np.isfinite(last_rate) and last_rate > 0:
+                success_candidates.append(last_rate)
+        if success_candidates:
+            success_ref = float(max(success_candidates))
+        else:
+            success_ref = float(fallback_max_last_rate) if np.isfinite(fallback_max_last_rate) and fallback_max_last_rate > 0 else 1.0
+        success_ref_map[key] = success_ref
+    # Optional overrides per map
+    if normalize_by_method:
+        map_to_methods: Dict[str, Dict[str, float]] = defaultdict(dict)
+        for (map_name, method), value in success_ref_map.items():
+            map_to_methods[map_name][method] = value
+        for map_name in map_to_methods.keys():
+            for target_method, ref_method in normalize_by_method.items():
+                ref_value = map_to_methods[map_name].get(ref_method)
+                if ref_value is not None:
+                    success_ref_map[(map_name, target_method)] = ref_value
+    return success_ref_map
+
 
 def process_single_bag(bag_path: str, args):
     (
@@ -691,7 +804,7 @@ def main():
     parser.add_argument('--success-time-limit', type=float, default=200.0, help='Max time (s) to consider a run successful if no failure')
     parser.add_argument('--image-width', type=int, default=1280, help='Image width for heatmaps')
     parser.add_argument('--image-height', type=int, default=640, help='Image height for heatmaps')
-    parser.add_argument('--bin-size', type=int, default=40, help='Bin size for heatmaps (px)')
+    parser.add_argument('--bin-size', type=int, default=20, help='Bin size for heatmaps (px)')
     parser.add_argument('--r2d2-scale', nargs=2, type=float, metavar=('MIN', 'MAX'), default=[0.0, 0.1], help='Fixed scale for R2D2 heatmaps')
     parser.add_argument('--ov-scale', nargs=2, type=float, metavar=('MIN', 'MAX'), default=[0.0, 0.6], help='Fixed scale for OV-MSCKF heatmaps')
     parser.add_argument('--assume-structure', choices=['map/method', 'method/map', 'auto'], default='auto', help='How to infer map/method from path')
@@ -771,26 +884,8 @@ def main():
             group_results[(map_name, method)].append(res)
 
     # Pass 1.5: 预计算 (map, method) -> success_ref 字典
-    success_ref_map: Dict[Tuple[str, str], float] = {}
-    for (map_name, method), results in group_results.items():
-        success_candidates = []
-        fallback_max_last_rate = 0.0
-        for res in results:
-            last_rate = res.get('last_exploration_rate', float('nan'))
-            if np.isfinite(last_rate) and last_rate > fallback_max_last_rate:
-                fallback_max_last_rate = float(last_rate)
-            if res.get('success_run', False) and np.isfinite(last_rate) and last_rate > 0:
-                success_candidates.append(float(last_rate))
-        if success_candidates:
-            success_ref = float(max(success_candidates))
-        else:
-            success_ref = float(fallback_max_last_rate) if np.isfinite(fallback_max_last_rate) and fallback_max_last_rate > 0 else 1.0
-        success_ref_map[(map_name, method)] = success_ref
-    
-    # Manually set success_ref for la_planner for every map
-    for (map_name, method), results in group_results.items():
-        if method == 'la_planner':
-            success_ref_map[(map_name, method)] = success_ref_map[(map_name, 'fuel')]
+    success_ref_map: Dict[Tuple[str, str], float] = build_success_ref_map(group_results, normalize_by_method={'la_planner': 'fuel'})
+    for (map_name, method), _results in group_results.items():
         print(f"Success ref for map={map_name}, method={method}: {success_ref_map[(map_name, method)]:.3f}")
 
     # Pass 2: 使用 success_ref_map 统一归一化并统计
@@ -819,16 +914,12 @@ def main():
                 r2d2_weight_means.append(res['r2d2_weight_mean_per_msg'])
 
             # Heatmap 累积（按消息数加权）
-            if sum_r2d2 is None:
-                sum_r2d2 = np.array(res['r2d2_heat'], dtype=np.float64) * max(1, res.get('r2d2_msg_count', 0))
+            sum_r2d2 = accumulate_heatmap(sum_r2d2, res['r2d2_heat'], res.get('r2d2_msg_count', 0))
+            sum_ov = accumulate_heatmap(sum_ov, res['ov_heat'], res.get('ov_msg_count', 0))
+            if r2d2_edges is None:
                 r2d2_edges = res['r2d2_edges']
-            else:
-                sum_r2d2 += np.array(res['r2d2_heat'], dtype=np.float64) * max(1, res.get('r2d2_msg_count', 0))
-            if sum_ov is None:
-                sum_ov = np.array(res['ov_heat'], dtype=np.float64) * max(1, res.get('ov_msg_count', 0))
+            if ov_edges is None:
                 ov_edges = res['ov_edges']
-            else:
-                sum_ov += np.array(res['ov_heat'], dtype=np.float64) * max(1, res.get('ov_msg_count', 0))
             total_r2d2_msgs += int(res.get('r2d2_msg_count', 0))
             total_ov_msgs += int(res.get('ov_msg_count', 0))
 
@@ -864,22 +955,12 @@ def main():
                         method_curve_pairs.append((pos_err_arr, norm_rate_arr, fallback_val))
 
         # 每消息密度平均
-        if sum_r2d2 is None or total_r2d2_msgs == 0:
-            avg_r2d2 = np.zeros((args.image_height // args.bin_size, args.image_width // args.bin_size))
-            r2d2_edges = (
-                np.linspace(0, args.image_width, args.image_width // args.bin_size + 1),
-                np.linspace(0, args.image_height, args.image_height // args.bin_size + 1),
-            )
-        else:
-            avg_r2d2 = sum_r2d2 / float(total_r2d2_msgs)
-        if sum_ov is None or total_ov_msgs == 0:
-            avg_ov = np.zeros((args.image_height // args.bin_size, args.image_width // args.bin_size))
-            ov_edges = (
-                np.linspace(0, args.image_width, args.image_width // args.bin_size + 1),
-                np.linspace(0, args.image_height, args.image_height // args.bin_size + 1),
-            )
-        else:
-            avg_ov = sum_ov / float(total_ov_msgs)
+        avg_r2d2 = average_heatmap(sum_r2d2, total_r2d2_msgs, args.image_width, args.image_height, args.bin_size)
+        avg_ov = average_heatmap(sum_ov, total_ov_msgs, args.image_width, args.image_height, args.bin_size)
+        if r2d2_edges is None:
+            r2d2_edges = default_edges(args.image_width, args.image_height, args.bin_size)
+        if ov_edges is None:
+            ov_edges = default_edges(args.image_width, args.image_height, args.bin_size)
 
         heatmaps_r2d2[map_name][method] = (avg_r2d2, r2d2_edges[0], r2d2_edges[1])
         heatmaps_ov[map_name][method] = (avg_ov, ov_edges[0], ov_edges[1])

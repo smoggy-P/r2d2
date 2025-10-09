@@ -105,7 +105,7 @@ def process_rosbag(bag_path):
                 elif topic == '/ov_msckf/loop_pose':
                     vins_odom_data.append([timestamp, msg])
                 
-                elif topic == '/r2d2/point_cloud':
+                elif topic == '/r2d2/visible_features_uv':
                     r2d2_pointcloud_data.append([timestamp, msg])
                 
                 elif topic == '/ov_msckf/loop_feats':
@@ -141,6 +141,59 @@ def synchronize_and_calculate_errors(exploration_data, gt_odom_data, vins_odom_d
     end_time = min(exploration_times.max(), gt_times.max(), vins_times.max())
     
     print(f"Common time range: {start_time:.2f} to {end_time:.2f} seconds")
+    
+    # Calculate speed thresholds for GT trajectory
+    def compute_speed_thresholds(times, x, y, z, speed_threshold=0.1):
+        """Find start and end times based on speed thresholds"""
+        if len(times) < 2:
+            return start_time, end_time
+            
+        t = times.astype(np.float64)
+        dx = np.diff(x)
+        dy = np.diff(y)
+        dz = np.diff(z)
+        dt = np.diff(t)
+        dt[dt == 0] = np.nan
+        speed = np.sqrt(dx*dx + dy*dy + dz*dz) / dt
+        t_mid = (t[1:] + t[:-1]) / 2.0
+        
+        # Find first time when speed exceeds threshold
+        speed_start_idx = np.where(speed >= speed_threshold)[0]
+        if len(speed_start_idx) > 0:
+            speed_start_time = t_mid[speed_start_idx[0]]
+        else:
+            speed_start_time = start_time
+            
+        # Find last time when speed exceeds threshold (going backwards)
+        speed_end_idx = np.where(speed >= speed_threshold)[0]
+        if len(speed_end_idx) > 0:
+            speed_end_time = t_mid[speed_end_idx[-1]]
+        else:
+            speed_end_time = end_time
+            
+        return speed_start_time, speed_end_time
+    
+    # Extract GT trajectory positions for speed calculation
+    gt_positions = []
+    gt_pos_times = []
+    for timestamp, msg in gt_odom_data:
+        if start_time <= timestamp <= end_time:
+            gt_positions.append([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+            gt_pos_times.append(timestamp)
+    
+    if len(gt_positions) >= 2:
+        gt_positions = np.array(gt_positions)
+        gt_pos_times = np.array(gt_pos_times)
+        speed_start_time, speed_end_time = compute_speed_thresholds(
+            gt_pos_times, gt_positions[:, 0], gt_positions[:, 1], gt_positions[:, 2]
+        )
+        print(f"Speed-based time range: {speed_start_time:.2f} to {speed_end_time:.2f} seconds")
+        # Update time range based on speed thresholds
+        start_time = max(start_time, speed_start_time)
+        end_time = min(end_time, speed_end_time)
+        print(f"Adjusted time range: {start_time:.2f} to {end_time:.2f} seconds")
+    else:
+        print("Warning: Insufficient GT trajectory data for speed threshold calculation")
     
     # Filter data to common time range
     exp_mask = (exploration_times >= start_time) & (exploration_times <= end_time)
@@ -406,192 +459,25 @@ def process_pointcloud_data(r2d2_pointcloud_data, ov_msckf_pointcloud_data,
             print(f"Error processing R2D2 point cloud message: {e}")
             continue
     
+    print("minimum u: ", np.min(r2d2_u_coords))
+    print("minimum v: ", np.min(r2d2_v_coords))
+    print("maximum u: ", np.max(r2d2_u_coords))
+    print("maximum v: ", np.max(r2d2_v_coords))
+    
     # Process OV-MSCKF loop features data
     for timestamp, msg in ov_msckf_pointcloud_data:
-        try:
-            # Check if this is PointCloud or PointCloud2
-            if hasattr(msg, 'fields'):
-                # PointCloud2 message
-                u_field = None
-                v_field = None
-                
-                for field in msg.fields:
-                    if field.name == 'u':
-                        u_field = field
-                    elif field.name == 'v':
-                        v_field = field
-                
-                if u_field is not None and v_field is not None:
-                    # Calculate byte offsets
-                    u_offset = u_field.offset
-                    v_offset = v_field.offset
-                    
-                    # Extract data for each point
-                    point_step = msg.point_step
-                    data = np.frombuffer(msg.data, dtype=np.uint8)
-                    
-                    for i in range(msg.width * msg.height):
-                        start_idx = i * point_step
-                        
-                        # Extract u, v coordinates
-                        u = np.frombuffer(data[start_idx + u_offset:start_idx + u_offset + 4], dtype=np.float32)[0]
-                        v = np.frombuffer(data[start_idx + v_offset:start_idx + v_offset + 4], dtype=np.float32)[0]
-                        
-                        ov_msckf_u_coords.append(u)
-                        ov_msckf_v_coords.append(v)
-            else:
-                # PointCloud message - check if it has channels
-                if hasattr(msg, 'channels') and len(msg.channels) > 0:
-                    # For OV-MSCKF, each channel contains [x, y, z, u, v] values
-                    # We need to extract u and v from the 3rd and 4th positions
-                    for channel in msg.channels:
-                        if len(channel.values) >= 5:  # Ensure we have at least 5 values
-                            # Extract u and v coordinates (3rd and 4th values)
-                            u = channel.values[2]  # 3rd value (index 2)
-                            v = channel.values[3]  # 4th value (index 3)
-                            
-                            ov_msckf_u_coords.append(u)
-                            ov_msckf_v_coords.append(v)
-                        else:
-                            print(f"Warning: Channel has insufficient values: {len(channel.values)}")
-                else:
-                    print(f"Warning: OV-MSCKF PointCloud message has no channels")
-                    
-        except Exception as e:
-            print(f"Error processing OV-MSCKF point cloud message: {e}")
-            continue
+        for i in range(len(msg.channels)):
+            u = msg.channels[i].values[2]
+            v = msg.channels[i].values[3]
+            
+            ov_msckf_u_coords.append(u)
+            ov_msckf_v_coords.append(v)
     
     print(f"Extracted {len(r2d2_u_coords)} R2D2 feature points")
     print(f"Extracted {len(ov_msckf_u_coords)} OV-MSCKF loop feature points")
     
     return (r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
             ov_msckf_u_coords, ov_msckf_v_coords)
-
-def create_heatmap(r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
-                   ov_msckf_u_coords, ov_msckf_v_coords, 
-                   r2d2_width=1280, r2d2_height=640,
-                   ov_width=1920, ov_height=1080,
-                   total_time=None, bin_size=20, 
-                   fixed_scale_r2d2=None, fixed_scale_ov=None):
-    """Create 2D heatmap showing feature point density normalized by time
-    
-    Args:
-        bin_size: Size of each bin in pixels (default: 20)
-        fixed_scale_r2d2: Fixed scale range for R2D2 heatmap [min, max] (optional)
-        fixed_scale_ov: Fixed scale range for OV-MSCKF heatmap [min, max] (optional)
-    """
-    
-    # Create 2D histogram for R2D2 features (weighted by intensity)
-    # Normalize the intensities to [0, 1]
-    r2d2_intensities = (r2d2_intensities - np.min(r2d2_intensities)) / (np.max(r2d2_intensities) - np.min(r2d2_intensities))
-    if len(r2d2_u_coords) > 0:
-        r2d2_heatmap, r2d2_x_edges, r2d2_y_edges = np.histogram2d(
-            r2d2_u_coords, r2d2_v_coords, 
-            bins=[r2d2_width//bin_size, r2d2_height//bin_size],  # 可调整的分辨率
-            range=[[0, r2d2_width], [0, r2d2_height]],
-            weights=r2d2_intensities
-        )
-        
-        # 如果提供了总时间，将热力图除以总时间进行归一化
-        if total_time is not None and total_time > 0:
-            r2d2_heatmap = r2d2_heatmap / total_time
-    else:
-        r2d2_heatmap = np.zeros((r2d2_height//bin_size, r2d2_width//bin_size))
-        r2d2_x_edges = np.linspace(0, r2d2_width, r2d2_width//bin_size + 1)
-        r2d2_y_edges = np.linspace(0, r2d2_height, r2d2_height//bin_size + 1)
-    
-    # Create 2D histogram for OV-MSCKF features (unweighted)
-    if len(ov_msckf_u_coords) > 0:
-        ov_msckf_heatmap, ov_x_edges, ov_y_edges = np.histogram2d(
-            ov_msckf_u_coords, ov_msckf_v_coords,
-            bins=[ov_width//bin_size, ov_height//bin_size],  # 可调整的分辨率
-            range=[[0, ov_width], [0, ov_height]]
-        )
-        
-        # 如果提供了总时间，将热力图除以总时间进行归一化
-        if total_time is not None and total_time > 0:
-            ov_msckf_heatmap = ov_msckf_heatmap / total_time
-    else:
-        ov_msckf_heatmap = np.zeros((ov_height//bin_size, ov_width//bin_size))
-        ov_x_edges = np.linspace(0, ov_width, ov_width//bin_size + 1)
-        ov_y_edges = np.linspace(0, ov_height, ov_height//bin_size + 1)
-    
-    # 使用 GridSpec: 顶部一行放两幅图，底部一行放滑动条
-    from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
-    fig = plt.figure(figsize=(16, 9))
-    fig.suptitle(f'Feature Point Density Heatmaps (Time Normalized, Bin Size: {bin_size}px)', fontsize=16, fontweight='bold')
-    gs = GridSpec(2, 2, height_ratios=[1, 0.12], hspace=0.28, wspace=0.25)
-    axes = [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])]
-    
-    # 计算数据统计信息用于颜色映射
-    r2d2_nonzero = r2d2_heatmap[r2d2_heatmap > 0]
-    ov_nonzero = ov_msckf_heatmap[ov_msckf_heatmap > 0]
-    
-    # 计算百分位数用于更好的颜色映射
-    r2d2_p95 = np.percentile(r2d2_nonzero, 95) if len(r2d2_nonzero) > 0 else 1.0
-    r2d2_p99 = np.percentile(r2d2_nonzero, 99) if len(r2d2_nonzero) > 0 else 1.0
-    ov_p95 = np.percentile(ov_nonzero, 95) if len(ov_nonzero) > 0 else 1.0
-    ov_p99 = np.percentile(ov_nonzero, 99) if len(ov_nonzero) > 0 else 1.0
-    
-    # 确定颜色映射范围 - 线性映射到 [0,1]
-    if fixed_scale_r2d2 is not None:
-        r2d2_vmin, r2d2_vmax = fixed_scale_r2d2
-        r2d2_title_suffix = f" (Fixed Scale: {r2d2_vmin:.2f}-{r2d2_vmax:.2f})"
-    else:
-        r2d2_vmin, r2d2_vmax = 0.0, 1.0
-        r2d2_title_suffix = " (Linear 0-1)"
-    
-    if fixed_scale_ov is not None:
-        ov_vmin, ov_vmax = fixed_scale_ov
-        ov_title_suffix = f" (Fixed Scale: {ov_vmin:.2f}-{ov_vmax:.2f})"
-    else:
-        ov_vmin, ov_vmax = 0.0, 1.0
-        ov_title_suffix = " (Linear 0-1)"
-    
-    # 线性显示，直接裁剪到 [0,1]
-    r2d2_display = np.clip(r2d2_heatmap, 0.0, 1.0)
-    im1 = axes[0].imshow(r2d2_display.T, origin='lower', 
-                        extent=[r2d2_x_edges[0], r2d2_x_edges[-1], r2d2_y_edges[0], r2d2_y_edges[-1]],
-                        aspect='auto', cmap='viridis', vmin=r2d2_vmin, vmax=r2d2_vmax)
-    axes[0].set_title(f'R2D2 Feature Density{r2d2_title_suffix}')
-    axes[0].set_xlabel('Image U Coordinate (pixels)')
-    axes[0].set_ylabel('Image V Coordinate (pixels)')
-    plt.colorbar(im1, ax=axes[0], label='Weighted Density per Second' if (total_time is not None and total_time > 0) else 'Weighted Density')
- 
-    ov_display = np.clip(ov_msckf_heatmap, 0.0, 1.0)
-    im2 = axes[1].imshow(ov_display.T, origin='lower',
-                        extent=[ov_x_edges[0], ov_x_edges[-1], ov_y_edges[0], ov_y_edges[-1]],
-                        aspect='auto', cmap='viridis', vmin=ov_vmin, vmax=ov_vmax)
-    axes[1].set_title(f'OV-MSCKF Feature Density{ov_title_suffix}')
-    axes[1].set_xlabel('Image U Coordinate (pixels)')
-    axes[1].set_ylabel('Image V Coordinate (pixels)')
-    plt.colorbar(im2, ax=axes[1], label='Feature Count per Second' if (total_time is not None and total_time > 0) else 'Feature Count')
-
-    # 统计打印保持不变
-    print("\n=== Feature Point Statistics ===")
-    if len(r2d2_u_coords) > 0:
-        print(f"R2D2 Features - Total: {len(r2d2_u_coords)}, "
-              f"Mean Intensity: {np.mean(r2d2_intensities):.3f}")
-        r2d2_nonzero_mean = np.mean(r2d2_nonzero) if len(r2d2_nonzero) > 0 else 0.0
-        print(f"R2D2 Density - Mean: {r2d2_nonzero_mean:.3f}, "
-              f"Max: {np.max(r2d2_heatmap):.3f}, "
-              f"95th percentile: {r2d2_p95:.3f}, "
-              f"99th percentile: {r2d2_p99:.3f}")
-    else:
-        print("R2D2 Features - No data available")
-
-    if len(ov_msckf_u_coords) > 0:
-        ov_nonzero_mean = np.mean(ov_nonzero) if len(ov_nonzero) > 0 else 0.0
-        print(f"OV-MSCKF Features - Total: {len(ov_msckf_u_coords)}")
-        print(f"OV-MSCKF Density - Mean: {ov_nonzero_mean:.3f}, "
-              f"Max: {np.max(ov_msckf_heatmap):.3f}, "
-              f"95th percentile: {ov_p95:.3f}, "
-              f"99th percentile: {ov_p99:.3f}")
-    else:
-        print("OV-MSCKF Features - No data available")
-    
-    return fig
-
 
 def draw_heatmaps_on_axes(ax_r2d2, ax_ov,
                           r2d2_u_coords, r2d2_v_coords, r2d2_intensities,
@@ -600,25 +486,14 @@ def draw_heatmaps_on_axes(ax_r2d2, ax_ov,
                           ov_width=1920, ov_height=1080,
                           total_time=None, bin_size=20,
                           fixed_scale_r2d2=None, fixed_scale_ov=None):
-    """在提供的 axes 上绘制 R2D2 和 OV-MSCKF 的热力图。
-
-    该函数复用 create_heatmap 的直方图与显示逻辑，但不再创建新的 Figure。
-    """
     import matplotlib.pyplot as plt
-
-    # 归一化 R2D2 强度到 [0,1]
-    if len(r2d2_intensities) > 0:
-        r2d2_intensities = (r2d2_intensities - np.min(r2d2_intensities)) / (
-            np.max(r2d2_intensities) - np.min(r2d2_intensities) if (np.max(r2d2_intensities) - np.min(r2d2_intensities)) != 0 else 1.0
-        )
 
     # R2D2 2D 直方图（按强度加权）
     if len(r2d2_u_coords) > 0:
         r2d2_heatmap, r2d2_x_edges, r2d2_y_edges = np.histogram2d(
             r2d2_u_coords, r2d2_v_coords,
             bins=[r2d2_width // bin_size, r2d2_height // bin_size],
-            range=[[0, r2d2_width], [0, r2d2_height]],
-            weights=r2d2_intensities
+            range=[[0, r2d2_width], [0, r2d2_height]]
         )
         if total_time is not None and total_time > 0:
             r2d2_heatmap = r2d2_heatmap / total_time
@@ -674,7 +549,7 @@ def draw_heatmaps_on_axes(ax_r2d2, ax_ov,
         label='Weighted Density per Second' if (total_time is not None and total_time > 0) else 'Weighted Density'
     )
 
-    ov_display = np.clip(ov_msckf_heatmap, 0.0, 1.0)
+    ov_display = np.clip(ov_msckf_heatmap, 0.0, 10.0)
     im2 = ax_ov.imshow(
         ov_display.T, origin='lower',
         extent=[ov_x_edges[0], ov_x_edges[-1], ov_y_edges[0], ov_y_edges[-1]],
@@ -900,7 +775,7 @@ def main():
     parser.add_argument('--image-height', type=int, default=720, help='Image height for R2D2 heatmap (default: 640)')
     parser.add_argument('--bin-size', type=int, default=20, help='Bin size for heatmap (default: 20)')
     parser.add_argument('--r2d2-scale', nargs=2, type=float, metavar=('MIN', 'MAX'), 
-                       default=[0.0, 0.05], help='Fixed scale range for R2D2 heatmap [min max] (default: 0.0 0.5)')
+                       default=[0.0, 0.1], help='Fixed scale range for R2D2 heatmap [min max] (default: 0.0 0.5)')
     parser.add_argument('--ov-scale', nargs=2, type=float, metavar=('MIN', 'MAX'),
                        default=[0.0, 1.0], help='Fixed scale range for OV-MSCKF heatmap [min max] (default: 0.0 0.5)')
     

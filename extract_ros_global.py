@@ -4,6 +4,7 @@
 import rospy
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from cv_bridge import CvBridge
+import message_filters  # 用于时间同步
 
 # 然后导入conda环境中的包
 import torch
@@ -63,11 +64,32 @@ class R2D2GlobalFeatureNode:
         self.img_height = rospy.get_param('~img_height', 720)
         self.camera_frame = rospy.get_param('~camera_frame', 'D435i_camera_depth_frame')
         self.max_view_distance = rospy.get_param('~max_view_distance', 10.0)  # 最大可视距离（米）
+        
+        # === NEW: 占据检查参数
+        # 如果点周围最近的占据体素距离大于此阈值，则认为周围是free，不添加该点
+        self.occupied_check_distance = rospy.get_param('~occupied_check_distance', 0.15)  # 默认0.3米
+        self.enable_occupied_check = rospy.get_param('~enable_occupied_check', True)  # 是否启用占据检查
 
         # 设置发布者和订阅者
         self.bridge = CvBridge()
-        self.image_sub = rospy.Subscriber('/D435i_camera/color/image_raw', Image, self.image_callback)
-        self.depth_sub = rospy.Subscriber("/D435i_camera/depth/image_rect_raw", Image, self.depth_callback)
+        
+        # 使用 message_filters 进行时间同步
+        self.image_sub = message_filters.Subscriber('/D435i_camera/color/image_raw', Image)
+        self.depth_sub = message_filters.Subscriber("/D435i_camera/depth/image_rect_raw", Image)
+        
+        # 近似时间同步器
+        # queue_size: 缓存队列大小
+        # slop: 允许的最大时间差（秒）
+        sync_queue_size = rospy.get_param('~sync_queue_size', 10)
+        sync_slop = rospy.get_param('~sync_slop', 0.05)  # 50ms
+        
+        self.ts = message_filters.ApproximateTimeSynchronizer(
+            [self.image_sub, self.depth_sub], 
+            queue_size=sync_queue_size, 
+            slop=sync_slop
+        )
+        self.ts.registerCallback(self.synced_callback)
+        
         self.odom_sub = rospy.Subscriber("/drone/odom", Odometry, self.odom_callback)
         self.vis_pub = rospy.Publisher('/r2d2/visualization', Image, queue_size=1)
         self.pc_pub = rospy.Publisher('/r2d2/point_cloud', PointCloud2, queue_size=1)
@@ -98,7 +120,6 @@ class R2D2GlobalFeatureNode:
         )
         
         # 创建状态变量
-        self.depth_img = None
         self.current_pose = np.eye(4)
         self.global_points = []  # List of [x, y, z, intensity]
         self.kdtree = None
@@ -145,12 +166,15 @@ class R2D2GlobalFeatureNode:
             rot[2, 3] = t.z
             return rot
 
-    def depth_callback(self, msg):
+    def synced_callback(self, image_msg, depth_msg):
+        """同步接收RGB图像和深度图像"""
         try:
-            # 将ROS图像消息转换为OpenCV格式
-            self.depth_img = self.bridge.imgmsg_to_cv2(msg, "16UC1")
+            # 转换深度图像
+            depth_img = self.bridge.imgmsg_to_cv2(depth_msg, "16UC1")
+            # 调用原有的处理逻辑
+            self.process_images(image_msg, depth_img)
         except Exception as e:
-            rospy.logerr(f"Error processing depth image: {str(e)}")
+            rospy.logerr(f"Error in synced callback: {str(e)}")
 
     # === NEW: 接收 OctoMap（仅用来获取分辨率等元信息；具体占据点靠 centers 点云）
     def octomap_callback(self, msg: Octomap):
@@ -171,6 +195,34 @@ class R2D2GlobalFeatureNode:
                 self.occ_kdtree = cKDTree(self.occ_points)
         except Exception as e:
             rospy.logwarn(f"Failed to parse octomap centers point cloud: {e}")
+
+    def is_point_near_occupied(self, point_world):
+        """检查世界坐标系中的点周围是否有占据体素
+        
+        Args:
+            point_world: np.array([x, y, z]) 世界坐标系中的点
+            
+        Returns:
+            bool: True 表示周围有占据体素（应该添加），False 表示周围是free（不添加）
+        """
+        # 如果没有启用占据检查，直接返回 True
+        if not self.enable_occupied_check:
+            return True
+            
+        # 如果没有 octomap 数据，保守策略：允许添加
+        if self.occ_kdtree is None:
+            return True
+        
+        try:
+            # 查询最近的占据体素
+            dist, _ = self.occ_kdtree.query(point_world, k=1)
+            
+            # 如果距离小于阈值，说明周围有occupied，返回True
+            # 如果距离大于阈值，说明周围是free，返回False
+            return dist < self.occupied_check_distance
+        except Exception as e:
+            rospy.logwarn_throttle(10.0, f"Occupied check failed: {e}")
+            return True  # 出错时保守策略：允许添加
 
     # === NEW: 世界点对当前相机位姿的可见性测试（含 FOV 与遮挡；遮挡需 occ_kdtree 可用）
     def is_visible_world(self, pw: np.ndarray, T_wc: np.ndarray) -> (bool, float, float):
@@ -222,17 +274,20 @@ class R2D2GlobalFeatureNode:
 
         return True, float(u), float(v)
 
-    def image_callback(self, msg):
+    def process_images(self, msg, depth_img):
+        """处理同步后的RGB图像和深度图像
+        
+        Args:
+            msg: RGB图像消息
+            depth_img: 已转换的深度图像(numpy array)
+        """
         try:
-            # 将ROS图像消息转换为OpenCV格式
             cv_image = self.bridge.imgmsg_to_cv2(msg, "rgb8")
             pil_image = PILImage.fromarray(cv_image)
             
-            # 准备输入
             img = norm_RGB(pil_image)[None]
             img = img.to(self.device)
             
-            # 提取特征点
             print("start extract")
             start_time = time.time()
             xys, desc, scores = extract_multiscale(
@@ -244,31 +299,26 @@ class R2D2GlobalFeatureNode:
                 max_size=1024
             )
             print("extract done, consuming time: ", time.time() - start_time)
-            # 转换为numpy数组
             xys = xys.cpu().numpy()
             scores = scores.cpu().numpy()
             
-            # 选择前N个特征点
             idxs = scores.argsort()[-self.num_keypoints:]
             selected_kpts = xys[idxs]
             selected_scores = scores[idxs]
-            
-            # 可视化
             vis_img = cv_image.copy()
             
-            # 将分数归一化到0-1
             print("selected_scores range: ", selected_scores.min(), selected_scores.max())
             norm_scores = (selected_scores - 0.9958) / (0.9992 - 0.9958)
             print("min score: ", norm_scores.min(), " max score: ", norm_scores.max())
             
             points = []
-            if self.depth_img is not None:
+            if depth_img is not None:
                 for kp, score in zip(selected_kpts, norm_scores):
                     x, y, scale = kp
                     # Project the keypoint to the depth image and publish point cloud
-                    if x < self.depth_img.shape[1] and y < self.depth_img.shape[0]:
-                        depth = self.depth_img[int(y), int(x)]
-                        if 0 <= depth <= 5000 and score > 0.95:
+                    if x < depth_img.shape[1] and y < depth_img.shape[0]:
+                        depth = depth_img[int(y), int(x)]
+                        if 0 <= depth <= 5000 and score > 0.8:
                             depth_meters = depth / 1000.0
 
                             x_world = depth_meters
@@ -303,18 +353,42 @@ class R2D2GlobalFeatureNode:
                 points_world = np.hstack([points_world, points_intensity])
 
                 if len(self.global_points) == 0:
-                    self.global_points = points_world.tolist()
-                    self.kdtree = cKDTree(points_world[:, :3])
+                    # 第一次添加点时，也进行占据检查
+                    filtered_points = []
+                    for pt in points_world:
+                        if self.is_point_near_occupied(pt[:3]):
+                            filtered_points.append(pt)
+                    
+                    if len(filtered_points) > 0:
+                        self.global_points = filtered_points
+                        self.kdtree = cKDTree(np.array(filtered_points)[:, :3])
                 else:
                     existing = np.array(self.global_points)
                     self.kdtree = cKDTree(existing[:, :3])
+                    
+                    # 统计添加和过滤的点数
+                    added_count = 0
+                    filtered_count = 0
+                    
                     for pt in points_world:
+                        # 首先检查占据情况
+                        if not self.is_point_near_occupied(pt[:3]):
+                            filtered_count += 1
+                            continue  # 周围是free，跳过这个点
+                        
+                        # 通过占据检查后，再检查是否需要合并
                         dist, idx = self.kdtree.query(pt[:3], k=1)
                         if dist < self.merge_distance:
                             if pt[3] > existing[idx, 3]:
                                 existing[idx, 3] = pt[3]
                         else:
                             existing = np.vstack([existing, pt])
+                            added_count += 1
+                    
+                    # 定期输出统计信息
+                    if filtered_count > 0:
+                        rospy.loginfo_throttle(5.0, f"R2D2: 过滤了 {filtered_count} 个周围为free的点, 添加了 {added_count} 个新点")
+                    
                     self.global_points = existing.tolist()
                     self.kdtree = cKDTree(np.array(self.global_points)[:, :3])
 

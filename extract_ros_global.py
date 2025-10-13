@@ -352,12 +352,16 @@ class R2D2GlobalFeatureNode:
                 points_intensity = points_np[:, 3:4]
                 points_world = np.hstack([points_world, points_intensity])
 
+                # 记录哪些点被成功添加到全局地图
+                added_indices = []
+                
                 if len(self.global_points) == 0:
                     # 第一次添加点时，也进行占据检查
                     filtered_points = []
-                    for pt in points_world:
+                    for i, pt in enumerate(points_world):
                         if self.is_point_near_occupied(pt[:3]):
                             filtered_points.append(pt)
+                            added_indices.append(i)
                     
                     if len(filtered_points) > 0:
                         self.global_points = filtered_points
@@ -366,14 +370,9 @@ class R2D2GlobalFeatureNode:
                     existing = np.array(self.global_points)
                     self.kdtree = cKDTree(existing[:, :3])
                     
-                    # 统计添加和过滤的点数
-                    added_count = 0
-                    filtered_count = 0
-                    
-                    for pt in points_world:
+                    for i, pt in enumerate(points_world):
                         # 首先检查占据情况
                         if not self.is_point_near_occupied(pt[:3]):
-                            filtered_count += 1
                             continue  # 周围是free，跳过这个点
                         
                         # 通过占据检查后，再检查是否需要合并
@@ -381,16 +380,23 @@ class R2D2GlobalFeatureNode:
                         if dist < self.merge_distance:
                             if pt[3] > existing[idx, 3]:
                                 existing[idx, 3] = pt[3]
+                                added_indices.append(i)  # 更新已有点也算
                         else:
                             existing = np.vstack([existing, pt])
-                            added_count += 1
-                    
-                    # 定期输出统计信息
-                    if filtered_count > 0:
-                        rospy.loginfo_throttle(5.0, f"R2D2: 过滤了 {filtered_count} 个周围为free的点, 添加了 {added_count} 个新点")
+                            added_indices.append(i)  # 新增点
                     
                     self.global_points = existing.tolist()
                     self.kdtree = cKDTree(np.array(self.global_points)[:, :3])
+
+                for idx in added_indices:
+                    u, v = int(points_np[idx, 4]), int(points_np[idx, 5])  
+                    intensity = points_np[idx, 3]  # score/intensity
+                    
+                    normalized_intensity = np.clip((intensity - 0.8) / 0.2, 0.0, 1.0)
+                    color_intensity = int(normalized_intensity * 255)
+                    color = (0, 255, color_intensity) 
+                    cv2.circle(vis_img, (u, v), 3, color, -1)
+                    cv2.circle(vis_img, (u, v), 5, (0, 255, 0), 1)
 
             # Publish visualization
             vis_msg = self.bridge.cv2_to_imgmsg(vis_img, "rgb8")

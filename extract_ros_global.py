@@ -85,20 +85,20 @@ class R2D2GlobalFeatureNode:
         # Model parameters
         self.model_path = rospy.get_param('~model_path', 'models/r2d2_WASF_N16.pt')
         self.num_keypoints = rospy.get_param('~num_keypoints', 1000)
-        self.reliability_thr = rospy.get_param('~reliability_thr', 0.9)
-        self.repeatability_thr = rospy.get_param('~repeatability_thr', 0.9)
+        self.reliability_thr = rospy.get_param('~reliability_thr', 0.7)
+        self.repeatability_thr = rospy.get_param('~repeatability_thr', 0.7)
         
         # Map parameters
         self.map_range_x = rospy.get_param("~map_range_x", 100.0)
         self.map_range_y = rospy.get_param("~map_range_y", 100.0)
         self.map_range_z = rospy.get_param("~map_range_z", 50.0)
         self.voxel_size = rospy.get_param("~voxel_size", 0.1)
-        self.merge_distance = rospy.get_param("~merge_distance", 0.2)
+        self.merge_distance = rospy.get_param("~merge_distance", 0.1)
         self.publish_rate = rospy.get_param("~publish_rate", 1.0)
         
         # Frame IDs
         self.world_frame = rospy.get_param("~world_frame", "world")
-        self.camera_frame = rospy.get_param("~camera_frame", "D435i_camera_depth_frame")
+        self.camera_frame = rospy.get_param("~camera_frame", "D435i_camera_color_frame")
         
         # Camera intrinsics
         self.fx = rospy.get_param('~fx', 695.99511719)
@@ -110,13 +110,13 @@ class R2D2GlobalFeatureNode:
         
         # Vision parameters
         self.max_view_distance = rospy.get_param('~max_view_distance', 10.0)
-        
+        self.score_threshold = rospy.get_param('~score_threshold', 0.7)
         # Octomap parameters
-        self.octomap_resolution = rospy.get_param('~octomap_resolution', 0.2)
+        self.octomap_resolution = rospy.get_param('~octomap_resolution', 0.1)
         self.ray_step_factor = rospy.get_param('~ray_step_factor', 0.8)
         self.occupied_check_distance = rospy.get_param('~occupied_check_distance', 0.15)
         self.enable_occupied_check = rospy.get_param('~enable_occupied_check', True)
-        self.use_raycasting = rospy.get_param('~use_raycasting', False)
+        self.use_raycasting = rospy.get_param('~use_raycasting', True)
         
         # Visualization parameters
         self.line_width = rospy.get_param('~visible_line_width', 0.02)
@@ -124,7 +124,7 @@ class R2D2GlobalFeatureNode:
         
         # Synchronization parameters
         self.sync_queue_size = rospy.get_param('~sync_queue_size', 10)
-        self.sync_slop = rospy.get_param('~sync_slop', 0.05)
+        self.sync_slop = rospy.get_param('~sync_slop', 0.1)
 
     def _init_ros_communication(self):
         """Initialize ROS publishers and subscribers."""
@@ -519,7 +519,7 @@ class R2D2GlobalFeatureNode:
             for kp, score in zip(keypoints, scores):
                 x, y, scale = kp
                 
-                if score < 0.8:
+                if score < self.score_threshold:
                     continue
                 
                 if x < 0 or x >= self.img_width or y < 0 or y >= self.img_height:
@@ -549,7 +549,7 @@ class R2D2GlobalFeatureNode:
                 for kp, score in zip(keypoints, scores):
                     x, y, scale = kp
                     
-                    if score < 0.8:
+                    if score < self.score_threshold:
                         continue
                     
                     if x < depth_img.shape[1] and y < depth_img.shape[0]:

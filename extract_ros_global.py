@@ -110,7 +110,7 @@ class R2D2GlobalFeatureNode:
         
         # Vision parameters
         self.max_view_distance = rospy.get_param('~max_view_distance', 10.0)
-        self.score_threshold = rospy.get_param('~score_threshold', 0.7)
+        self.score_threshold = rospy.get_param('~score_threshold', 0.9)
         # Octomap parameters
         self.octomap_resolution = rospy.get_param('~octomap_resolution', 0.1)
         self.ray_step_factor = rospy.get_param('~ray_step_factor', 0.8)

@@ -354,7 +354,7 @@ class ExperimentRunner:
             if self.record_rosbag:
                 bag_name = f"{self.world_name}_exp_{exp_num}_{datetime.now().strftime('%H%M%S')}"
                 self.log_message(f"Starting rosbag recording: {bag_name}")
-                bag_output_dir = os.path.abspath(os.path.join(self.experiment_dir, self.method))
+                bag_output_dir = os.path.abspath(os.path.join(self.experiment_dir, self.method, "_new"))
                 os.makedirs(bag_output_dir, exist_ok=True)
                 bag_output_base = os.path.join(bag_output_dir, bag_name)
                 rosbag_cmd = [

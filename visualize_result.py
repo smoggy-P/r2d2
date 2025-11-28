@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 import random
 
-def visualize_keypoints(img_path, kpts_path, output_path, num_points=100):
+def visualize_keypoints(img_path, kpts_path, output_path=None, num_points=100):
     # 读取原始图像
     img = Image.open(img_path)
     img = np.array(img)
@@ -29,8 +29,7 @@ def visualize_keypoints(img_path, kpts_path, output_path, num_points=100):
         plt.scatter(x, y, s=scale*50*score, c='r', alpha=0.6)
     
     plt.axis('off')
-    plt.savefig(output_path, bbox_inches='tight', pad_inches=0)
-    plt.close()
+    plt.show()
 
 if __name__ == '__main__':
     import argparse
@@ -42,4 +41,4 @@ if __name__ == '__main__':
     if args.kpts is None:
         args.kpts = args.img + '.r2d2'
         
-    visualize_keypoints(args.img, args.kpts, args.kpts + '.viz.png')
+    visualize_keypoints(args.img, args.kpts)

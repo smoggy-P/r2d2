@@ -1,2 +1,4 @@
 .vscode
 *__pycache__
+experiments/**
+results_batch/**

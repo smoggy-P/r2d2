@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 
-# 首先导入ROS相关包
 import rospy
 import cv2
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from cv_bridge import CvBridge
 
-# 然后导入conda环境中的包
 import torch
 import numpy as np
 
@@ -23,7 +21,6 @@ import sensor_msgs.point_cloud2 as pc2
 from threading import Lock
 from scipy.spatial import cKDTree
 from collections import deque
-import message_filters
 from visualization_msgs.msg import Marker
 from octomap_msgs.msg import Octomap
 import tf
@@ -31,13 +28,6 @@ from geometry_msgs.msg import PoseStamped
 
 
 class R2D2GlobalFeatureNode:
-    """
-    简化版：
-    - 订阅 RGB 图像 + 占据体素中心 + 无人机位姿
-    - 在图像上做 R2D2 特征提取
-    - 用位姿和 occupied centers raycasting 得到 3D 点
-    - 维护并发布全局 feature map（PointCloud2）
-    """
 
     # Camera to baselink translation (x, y, z) in meters
     CAMERA_TO_BASELINK_TRANSLATION = np.array([0.05, 0.325, 0.1475])
@@ -52,9 +42,7 @@ class R2D2GlobalFeatureNode:
 
         rospy.Timer(rospy.Duration(1.0 / self.publish_rate), self.publish_global_map)
 
-        rospy.loginfo("R2D2 Global Feature Node (simplified) initialized")
-
-    # ==================== 参数 ====================
+        rospy.loginfo("R2D2 Global Feature Node (manual sync) initialized")
 
     def _load_parameters(self):
         # 模型相关
@@ -62,7 +50,7 @@ class R2D2GlobalFeatureNode:
         self.num_keypoints = rospy.get_param('~num_keypoints', 1000)
         self.reliability_thr = rospy.get_param('~reliability_thr', 0.9)
         self.repeatability_thr = rospy.get_param('~repeatability_thr', 0.9)
-        self.score_threshold = rospy.get_param('~score_threshold', 0.999)
+        self.score_threshold = rospy.get_param('~score_threshold', 0.998)
 
         # 地图与发布
         self.merge_distance = rospy.get_param('~merge_distance', 0.1)
@@ -85,11 +73,12 @@ class R2D2GlobalFeatureNode:
 
         # 同步参数
         self.sync_queue_size = rospy.get_param('~sync_queue_size', 5)
-        self.sync_slop = rospy.get_param('~sync_slop', 0.05)
+        self.sync_slop = rospy.get_param('~sync_slop', 0.05)  # seconds
 
         # 话题名（可用 rosparam 覆盖）
         self.image_topic = rospy.get_param('~image_topic', '/zedm/zed_node/rgb/image_rect_color')
         self.pose_topic = rospy.get_param('~pose_topic', '/vrpn_client_node/kingfisher/pose')
+        # self.pose_topic = rospy.get_param('~pose_topic', '/zedm/zed_node/pose')
         self.occ_centers_topic = rospy.get_param(
             '~occ_centers_topic', '/sdf_map/occupancy_all'
         )
@@ -99,16 +88,13 @@ class R2D2GlobalFeatureNode:
     def _init_ros_communication(self):
         self.bridge = CvBridge()
 
-        # 同步：RGB 图像 + 无人机位姿
-        self.image_sub = message_filters.Subscriber(self.image_topic, Image)
-        self.pose_sub = message_filters.Subscriber(self.pose_topic, PoseStamped)
-
-        self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.image_sub, self.pose_sub],
-            queue_size=self.sync_queue_size,
-            slop=self.sync_slop
+        # 手动同步：分别订阅图像和位姿
+        self.image_sub = rospy.Subscriber(
+            self.image_topic, Image, self.image_callback, queue_size=1
         )
-        self.ts.registerCallback(self.synced_callback)
+        self.pose_sub = rospy.Subscriber(
+            self.pose_topic, PoseStamped, self.pose_callback, queue_size=self.sync_queue_size * 10
+        )
 
         # 占据体素中心
         self.octo_centers_sub = rospy.Subscriber(
@@ -144,6 +130,10 @@ class R2D2GlobalFeatureNode:
 
         self.occ_points = None          # occupied voxel centers
         self.occ_kdtree = None
+
+        # 同步相关：保存最近一段时间的位姿
+        self.sync_lock = Lock()
+        self.pose_buffer = deque(maxlen=self.sync_queue_size * 20)
 
     # ==================== Octomap occupied centers ====================
 
@@ -218,20 +208,62 @@ class R2D2GlobalFeatureNode:
 
         return None
 
-    # ==================== 同步回调 ====================
+    # ==================== 手动同步相关 ====================
 
-    def synced_callback(self, image_msg: Image, pose_msg: PoseStamped):
+    def pose_callback(self, pose_msg: PoseStamped):
+        """位姿回调：简单地把位姿存入 buffer。"""
+        with self.sync_lock:
+            self.pose_buffer.append(pose_msg)
+
+    def _get_closest_pose(self, stamp):
         """
-        同步的 RGB 图像 + 无人机位姿回调.
+        在 pose_buffer 中找到时间戳最接近 stamp 的 pose，
+        若时间差小于 self.sync_slop（秒）则返回，否则返回 None。
+        """
+        if not self.pose_buffer:
+            return None
+
+        t_img = stamp.to_sec()
+        best_pose = None
+        best_dt = None
+        max_dt = self.sync_slop
+
+        # 遍历 buffer 找最近的时间
+        for pose in self.pose_buffer:
+            t_pose = pose.header.stamp.to_sec()
+            dt = abs(t_pose - t_img)
+            if best_dt is None or dt < best_dt:
+                best_dt = dt
+                best_pose = pose
+
+        if best_dt is not None and best_dt <= max_dt:
+            return best_pose
+        else:
+            return None
+
+    def image_callback(self, image_msg: Image):
+        """
+        图像回调：为该图像找一帧时间戳最近的位姿，然后调用原来的处理函数。
         """
         try:
+            with self.sync_lock:
+                pose_msg = self._get_closest_pose(image_msg.header.stamp)
+
+            if pose_msg is None:
+                # 没有找到足够接近的位姿就直接丢弃这一帧图像
+                rospy.logdebug("No suitable pose found for image timestamp, skipping frame")
+                return
+
+            # 有匹配的位姿，执行原始逻辑
             self.process_image_and_pose(image_msg, pose_msg)
+
         except Exception as e:
-            rospy.logerr(f"Error in synced callback: {e}")
+            rospy.logerr(f"Error in image callback: {e}")
 
     # ==================== 核心处理 ====================
 
     def process_image_and_pose(self, image_msg: Image, pose_msg: PoseStamped):
+        print("start process image")
         # 转成 numpy 图像
         cv_image = self.bridge.imgmsg_to_cv2(image_msg, "rgb8")
         pil_image = PILImage.fromarray(cv_image)

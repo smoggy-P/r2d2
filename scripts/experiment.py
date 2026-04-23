@@ -27,6 +27,7 @@ class ExperimentRunner:
         self.log_file = os.path.join(self.experiment_dir, "experiment_log.txt")
         self.method = method
         self.record_rosbag = record_rosbag
+        self.conda_profile = "/home/smoggy/anaconda3/etc/profile.d/conda.sh"
         # Subdirectory per method for bag files
         self.method_dir = os.path.join(self.experiment_dir, str(self.method))
         
@@ -266,22 +267,22 @@ class ExperimentRunner:
                 sim_cmd = [
                     'gnome-terminal', '--title', f'Sim_Exp_{exp_num}',
                     '--', 'bash', '-c',
-                    f"""cd ~/workspace_ros1/vo_safe_ws && 
-                    source ~/.bashrc &&
-                    eval "$(conda shell.bash hook)" &&
-                    conda deactivate &&
-                    source devel/setup.bash --extend &&
+                    f"""set -eo pipefail
+                    cd /home/smoggy/workspace_ros1/vo_safe_ws
+                    [ -f "{self.conda_profile}" ] && source "{self.conda_profile}"
+                    conda deactivate >/dev/null 2>&1 || true
+                    source devel/setup.bash --extend
                     roslaunch agiros simulation.launch world_name:="/home/smoggy/workspace_ros1/vo_safe_ws/src/vo_safe_exploration/vo_safe_frontier/experiment/worlds/{self.world_name}.world" 2>&1 | tee '{sim_log}'"""
                 ]
             else:
                 sim_cmd = [
                     'gnome-terminal', '--title', f'Sim_Exp_{exp_num}',
                     '--', 'bash', '-c',
-                    f"""cd ~/workspace_ros1/vo_safe_ws && 
-                    source ~/.bashrc &&
-                    eval "$(conda shell.bash hook)" &&
-                    conda deactivate &&
-                    source devel/setup.bash --extend &&
+                    f"""set -eo pipefail
+                    cd /home/smoggy/workspace_ros1/vo_safe_ws
+                    [ -f "{self.conda_profile}" ] && source "{self.conda_profile}"
+                    conda deactivate >/dev/null 2>&1 || true
+                    source devel/setup.bash --extend
                     roslaunch agiros simulation_fuel.launch world_name:="/home/smoggy/workspace_ros1/vo_safe_ws/src/vo_safe_exploration/vo_safe_frontier/experiment/worlds/{self.world_name}.world" 2>&1 | tee '{sim_log}'"""
                 ]
 
@@ -322,12 +323,12 @@ class ExperimentRunner:
             r2d2_cmd = [
                 'gnome-terminal', '--title', f'R2D2_Exp_{exp_num}',
                 '--', 'bash', '-c',
-                f"""cd ~/workspace_ros1/r2d2 && 
-                source ~/.bashrc &&
-                eval "$(conda shell.bash hook)" &&
-                conda activate r2d2-gpu && 
-                source /home/smoggy/workspace_ros1/vo_safe_ws/devel/setup.bash &&
-                python extract_ros_global.py"""
+                f"""set -eo pipefail
+                cd /home/smoggy/workspace_ros1/r2d2
+                source "{self.conda_profile}"
+                conda activate r2d2-gpu
+                source /home/smoggy/workspace_ros1/vo_safe_ws/devel/setup.bash
+                python extract_ros_global.py 2>&1 | tee '{r2d2_log}'"""
             ]
             self.processes['r2d2'] = subprocess.Popen(r2d2_cmd)
             time.sleep(2)

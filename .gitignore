@@ -3,3 +3,4 @@
 experiments/**
 results_batch/**
 *.bag
+.codex

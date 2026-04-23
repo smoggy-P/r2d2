@@ -66,14 +66,14 @@ class R2D2GlobalFeatureNode:
         # Load ROS parameters
         self._load_parameters()
         
-        # Initialize ROS communication
-        self._init_ros_communication()
-        
-        # Initialize R2D2 network
-        self._init_network()
-        
         # Initialize state variables
         self._init_state()
+        
+        # Initialize R2D2 network before subscribers can invoke callbacks
+        self._init_network()
+        
+        # Initialize ROS communication
+        self._init_ros_communication()
         
         # Start periodic publishing
         rospy.Timer(rospy.Duration(1.0 / self.publish_rate), self.publish_global_map)

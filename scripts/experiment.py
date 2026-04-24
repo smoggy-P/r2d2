@@ -19,7 +19,8 @@ import psutil
 import logging
 
 class ExperimentRunner:
-    def __init__(self, world_name, total_experiments, max_exploration_time=300, method='vo_safe', record_rosbag=True):
+    def __init__(self, world_name, total_experiments, max_exploration_time=300, method='vo_safe',
+                 record_rosbag=True, qc_expect=None):
         self.world_name = world_name
         self.total_experiments = total_experiments
         self.max_exploration_time = max_exploration_time  # Maximum time to wait for exploration completion (seconds)
@@ -28,6 +29,7 @@ class ExperimentRunner:
         self.method = method
         self.record_rosbag = record_rosbag
         self.conda_profile = "/home/smoggy/anaconda3/etc/profile.d/conda.sh"
+        self.qc_expect = qc_expect
         # Subdirectory per method for bag files
         self.method_dir = os.path.join(self.experiment_dir, str(self.method))
         
@@ -94,11 +96,17 @@ class ExperimentRunner:
         for name, process in self.processes.items():
             if process and process.poll() is None:
                 try:
-                    process.terminate()
+                    if name == 'rosbag':
+                        os.killpg(os.getpgid(process.pid), signal.SIGINT)
+                    else:
+                        process.terminate()
                     process.wait(timeout=5)
                 except (subprocess.TimeoutExpired, ProcessLookupError):
                     try:
-                        process.kill()
+                        if name == 'rosbag':
+                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        else:
+                            process.kill()
                     except ProcessLookupError:
                         pass
         
@@ -272,7 +280,7 @@ class ExperimentRunner:
                     [ -f "{self.conda_profile}" ] && source "{self.conda_profile}"
                     conda deactivate >/dev/null 2>&1 || true
                     source devel/setup.bash --extend
-                    roslaunch agiros simulation.launch world_name:="/home/smoggy/workspace_ros1/vo_safe_ws/src/vo_safe_exploration/vo_safe_frontier/experiment/worlds/{self.world_name}.world" 2>&1 | tee '{sim_log}'"""
+                    roslaunch agiros simulation.launch world_name:="/home/smoggy/workspace_ros1/vo_safe_ws/src/vo_safe_exploration/vo_safe_frontier/experiment/worlds/{self.world_name}.world"{f' qc_expect:={self.qc_expect}' if self.qc_expect is not None else ''} 2>&1 | tee '{sim_log}'"""
                 ]
             else:
                 sim_cmd = [
@@ -353,20 +361,39 @@ class ExperimentRunner:
             
             # 7. Start rosbag recording in new terminal
             if self.record_rosbag:
-                bag_name = f"{self.world_name}_exp_{exp_num}_{datetime.now().strftime('%H%M%S')}"
+                qc_label = f"qc_expect_{self.qc_expect:g}" if self.qc_expect is not None else None
+                bag_name_parts = [self.world_name]
+                if qc_label:
+                    bag_name_parts.append(qc_label)
+                bag_name_parts.extend([f"exp_{exp_num}", datetime.now().strftime('%H%M%S')])
+                bag_name = "_".join(bag_name_parts)
                 self.log_message(f"Starting rosbag recording: {bag_name}")
-                bag_output_dir = os.path.abspath(os.path.join(self.experiment_dir, self.method, "_new"))
+                bag_dir_parts = [self.experiment_dir, self.method]
+                if qc_label:
+                    bag_dir_parts.append(qc_label)
+                else:
+                    bag_dir_parts.append("_new")
+                bag_output_dir = os.path.abspath(os.path.join(*bag_dir_parts))
                 os.makedirs(bag_output_dir, exist_ok=True)
                 bag_output_base = os.path.join(bag_output_dir, bag_name)
                 rosbag_cmd = [
-                    'gnome-terminal', '--title', f'Rosbag_Exp_{exp_num}',
-                    '--', 'bash', '-c',
-                    f"""cd ~/workspace_ros1/r2d2 && 
-                    rosbag record -O '{bag_output_base}' /ov_msckf/loop_pose /kingfisher/ground_truth/odometry /exploration_rate /ov_msckf/loop_feats /sdf_map/occupancy_all /sdf_map/occupancy_local /r2d2/visible_features_uv"""
+                    'rosbag', 'record', '-O', bag_output_base,
+                    '/ov_msckf/loop_pose',
+                    '/kingfisher/ground_truth/odometry',
+                    '/exploration_rate',
+                    '/ov_msckf/loop_feats',
+                    '/sdf_map/occupancy_all',
+                    '/sdf_map/occupancy_local',
+                    '/r2d2/visible_features_uv',
                 ]
-                self.processes['rosbag'] = subprocess.Popen(rosbag_cmd)
+                self.processes['rosbag'] = subprocess.Popen(
+                    rosbag_cmd,
+                    cwd='/home/smoggy/workspace_ros1/r2d2',
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
+                    preexec_fn=os.setsid,
+                )
                 time.sleep(2)
-                self.window_ids['rosbag'] = self.get_window_id(f'Rosbag_Exp_{exp_num}')
             else:
                 self.log_message("Rosbag recording disabled by parameter", 'YELLOW')
             
@@ -391,12 +418,12 @@ class ExperimentRunner:
                     if 'rosbag' in self.processes and self.processes['rosbag']:
                         try:
                             # Send SIGINT to rosbag process to stop recording gracefully
-                            self.processes['rosbag'].send_signal(signal.SIGINT)
+                            os.killpg(os.getpgid(self.processes['rosbag'].pid), signal.SIGINT)
                             self.processes['rosbag'].wait(timeout=10)
                             self.log_message("Rosbag stopped successfully")
                         except (subprocess.TimeoutExpired, ProcessLookupError):
                             try:
-                                self.processes['rosbag'].kill()
+                                os.killpg(os.getpgid(self.processes['rosbag'].pid), signal.SIGKILL)
                             except ProcessLookupError:
                                 pass
                     
@@ -442,12 +469,12 @@ class ExperimentRunner:
                     self.log_message("Stopping rosbag recording after timeout...")
                     if 'rosbag' in self.processes and self.processes['rosbag']:
                         try:
-                            self.processes['rosbag'].send_signal(signal.SIGINT)
+                            os.killpg(os.getpgid(self.processes['rosbag'].pid), signal.SIGINT)
                             self.processes['rosbag'].wait(timeout=10)
                             self.log_message("Rosbag stopped successfully")
                         except (subprocess.TimeoutExpired, ProcessLookupError):
                             try:
-                                self.processes['rosbag'].kill()
+                                os.killpg(os.getpgid(self.processes['rosbag'].pid), signal.SIGKILL)
                             except ProcessLookupError:
                                 pass
                     
@@ -506,6 +533,8 @@ class ExperimentRunner:
     def run_experiments(self):
         """Run all experiments"""
         self.log_message(f"Starting experiment series: {self.total_experiments} experiments with world {self.world_name}", 'GREEN')
+        if self.qc_expect is not None:
+            self.log_message(f"qc_expect: {self.qc_expect:g}")
         self.log_message(f"Results will be saved to: {self.experiment_dir}")
         
         # Check dependencies
@@ -548,13 +577,16 @@ def main():
                        help='Method to use for exploration (default: vo_safe)')
     parser.add_argument('--no-rosbag', action='store_true',
                        help='Disable rosbag recording')
+    parser.add_argument('--qc-expect', type=float, default=None,
+                       help='Override simulation.launch qc_expect for vo_safe experiments')
     args = parser.parse_args()
     
     if args.total_experiments <= 0:
         print("Error: total_experiments must be a positive integer")
         sys.exit(1)
     
-    runner = ExperimentRunner(args.world_name, args.total_experiments, args.max_exploration_time, args.method, record_rosbag=(not args.no_rosbag))
+    runner = ExperimentRunner(args.world_name, args.total_experiments, args.max_exploration_time, args.method,
+                              record_rosbag=(not args.no_rosbag), qc_expect=args.qc_expect)
     runner.run_experiments()
 
 if __name__ == "__main__":
